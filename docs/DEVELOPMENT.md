@@ -355,7 +355,7 @@ is, with Directions here. UCSD's points can be 10–60 m off.
 buttons show every MTS trolley, and every bus near campus, where it is right now.
 - **The data:** MTS's real-time OneBusAway API, `where/vehicles-for-agency/MTS.json`
   (`apps/web/src/mts.ts`), read straight from the browser and refreshed every
-  20 s while either button is on, with one request for both. `liveVehicles` in
+  10 s while either button is on, with one request for both. `liveVehicles` in
   `packages/core/src/liveTransit.ts` keeps vehicles on a trip on light-rail
   routes (GTFS route type 0) and bus routes (type 3).
 - **On the map:** each vehicle is a badge in its line's colour. Trolleys show a
@@ -365,7 +365,27 @@ buttons show every MTS trolley, and every bus near campus, where it is right now
   3 km of campus.
 - **Tapping one** shows its line and destination, and its next stop with
   arrival time ("Blue Line to UTC · Next: Executive Drive, in 3 min"; marked
-  "scheduled" when MTS has no live prediction).
+  "scheduled" when MTS has no live prediction). It also shows how old the
+  vehicle's last real GPS fix is.
+- **Route ahead:** tapping a vehicle also draws the rest of its trip in its line's
+  colour (`trip-details` and `shape`; `tripAhead`), with its upcoming stops and
+  predicted times (timetable plus its current delay). The line starts under the
+  vehicle and shortens as it moves, stops drop off once passed, and it updates
+  with each refresh. It closes with the popup, or after the vehicle has been
+  missing from 4 updates in a row.
+- **Movement:** positions refresh every 10 s, and at once when the tab comes back
+  into view. Between refreshes each vehicle moves along its route's path (each
+  path fetched once, one at a time) at its measured speed. A new speed counts
+  for a third and takes over gradually over 10 s; the gap between where it's
+  drawn and its new report also eases out over 10 s. It never goes backwards,
+  slows into its next stop and waits there until a report says it has left, and
+  turns with the road. Before its path arrives it glides in a straight line.
+  Reduced motion turns this off.
+- **What the positions are:** MTS's position isn't a GPS reading. It's the last
+  GPS fix (buses about every 40 s, trolleys about every 97 s) moved on along the
+  route by the timetable, a median of about 230 m (buses) or 1.1 km (trolleys)
+  from the fix. MTS sometimes answers with an empty body, so requests are tried
+  up to three times.
 - **The key:** MTS requires an API key, requested with the form on
   https://www.sdmts.com/business-center/app-developers/real-time-data (5–7
   business days). Set it as `VITE_MTS_KEY` in `apps/web/.env.local` (see

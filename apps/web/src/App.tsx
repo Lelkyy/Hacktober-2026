@@ -345,9 +345,12 @@ export function App() {
     };
     load();
     const timer = setInterval(load, SPIN_REFRESH_MS);
+    const onVisible = () => document.visibilityState === "visible" && load();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       stopped = true;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [spinOn]);
 
@@ -372,9 +375,13 @@ export function App() {
     };
     load();
     const timer = setInterval(load, LIVE_REFRESH_MS);
+    // Browsers slow timers in a background tab: catch up as soon as it's back in view.
+    const onVisible = () => document.visibilityState === "visible" && load();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       stopped = true;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [liveOn]);
 

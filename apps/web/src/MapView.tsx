@@ -1,4 +1,18 @@
-import { haversine, type CampusGraph, type LiveVehicle, type LngLat, type SharedBike, type TransitStop } from "@campus/core";
+import {
+  haversine,
+  alongPath,
+  measurePath,
+  pathFrom,
+  pointAlong,
+  type CampusGraph,
+  type LiveVehicle,
+  type LngLat,
+  type MeasuredPath,
+  type SharedBike,
+  type TransitStop,
+  type TripAhead,
+} from "@campus/core";
+import { fetchTripAhead, getShape, LIVE_REFRESH_MS } from "./mts.ts";
 import {
   GeolocateControl,
   LngLatBounds,
@@ -63,6 +77,69 @@ export interface RouteLine {
   /** A ride along a road: drawn on the right-hand side of it, where cyclists ride. */
   keepRight?: boolean;
 }
+
+/** Moves longer than this (a vehicle starting another trip, a gap in the feed) aren't animated. */
+const GLIDE_MAX_METERS = 800;
+/** Fastest a trolley or bus is taken to go (m/s, ~67 mph): faster is a glitch in the reports. */
+const MAX_SPEED = 30;
+/** Over its last this-many meters before a stop, a vehicle slows into it. */
+const STOP_EASE_METERS = 15;
+/** Updates in a row a followed vehicle can be missing from before its popup and route close. */
+const MISSING_UPDATES = 4;
+/** How long a vehicle keeps moving on its last speed without a new report. */
+const KEEP_GOING_MS = 25_000;
+/** How long the difference between where a vehicle is drawn and its new report takes to ease out,
+ *  and how long a change of speed takes: about the time to the next report. */
+const EASE_MS = 10_000;
+/** How much one report's speed counts toward a vehicle's speed (the rest is its speed so far). */
+const SPEED_DAMPING = 1 / 3;
+
+/** A live vehicle's marker, and how it's moving along its route between reports. */
+interface Moving {
+  marker: Marker;
+  vehicle: LiveVehicle;
+  /** Its trip's path, once fetched, and which path that is. */
+  path: MeasuredPath | null;
+  pathFor?: string;
+  /** Distance along the route at the last report (m), when that came (performance.now()), and the
+   *  speed it's changing to (m/s), from `speedFrom` at that report. */
+  d: number;
+  t: number;
+  speed: number;
+  speedFrom: number;
+  /** How far along it was last drawn (it doesn't go back). */
+  shown?: number;
+  /** Where its next stop is along the route (m): it isn't drawn past it before a report says it's left. */
+  stopAlong?: number;
+  /** Where it was drawn minus where it was reported (m), being eased out since `offsetAt`. */
+  offset: number;
+  offsetAt: number;
+  /** Straight-line glide, while its path isn't known. */
+  glide: { from: LngLat; to: LngLat; start: number };
+  /** Whether it's being drawn along its route (rather than gliding). */
+  onPath?: boolean;
+}
+
+/** Smoothstep: 0 to 1 with no sudden start or stop. */
+const smooth = (x: number) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
+
+/** How fast a vehicle is going at `now`: its speed changing evenly from `speedFrom` to `speed` after a report. */
+function speedNow(m: Moving, now: number): number {
+  return m.speedFrom + (m.speed - m.speedFrom) * Math.min(1, (now - m.t) / EASE_MS);
+}
+
+/**
+ * Where along its route a vehicle is drawn at `now`: its last report, moved on at its (gradually
+ * changing) speed, plus the gap to where it was drawn, eased out smoothly.
+ */
+function alongNow(m: Moving, now: number): number {
+  const tau = Math.min(now - m.t, KEEP_GOING_MS) / 1000;
+  const ramp = EASE_MS / 1000;
+  const [s0, s1] = [m.speedFrom, m.speed];
+  const travelled = tau < ramp ? s0 * tau + ((s1 - s0) * tau * tau) / (2 * ramp) : s0 * ramp + ((s1 - s0) * ramp) / 2 + s1 * (tau - ramp);
+  return m.d + travelled + m.offset * (1 - smooth((now - m.offsetAt) / EASE_MS));
+}
+const reducedMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
 /** Shift for a ride on a road: about 3.5 m to the right of the centre line, at any zoom. */
 const KEEP_RIGHT_OFFSET: ExpressionSpecification = [
@@ -225,7 +302,7 @@ export function MapView(props: MapViewProps) {
       });
       for (const layer of UCSD_LAYERS) map.addLayer({ ...layer, layout: { ...layer.layout, visibility: "none" } } as LayerSpecification);
 
-      for (const id of ["route", "connectors", "stops", "doors", "day", "places", "spin"]) {
+      for (const id of ["route", "connectors", "stops", "doors", "day", "places", "spin", "vehicle-ahead"]) {
         map.addSource(id, { type: "geojson", data: EMPTY });
       }
       // UCSD's places, under everything of the app's; names once zoomed in.
@@ -257,6 +334,52 @@ export function MapView(props: MapViewProps) {
           "text-optional": true,
         },
         paint: { "text-color": ["get", "color"], "text-halo-color": PALETTE.white, "text-halo-width": 1.5 },
+      });
+      // A tapped trolley or bus: the rest of its route in its line's color, and its stops to come
+      // with how long until it gets there.
+      map.addLayer({
+        id: "vehicle-ahead-casing",
+        type: "line",
+        source: "vehicle-ahead",
+        filter: ["==", ["geometry-type"], "LineString"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": PALETTE.white, "line-width": ["interpolate", ["linear"], ["zoom"], 12, 5, 17, 10], "line-opacity": 0.9 },
+      });
+      map.addLayer({
+        id: "vehicle-ahead",
+        type: "line",
+        source: "vehicle-ahead",
+        filter: ["==", ["geometry-type"], "LineString"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": ["get", "color"], "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2.5, 17, 6] },
+      });
+      map.addLayer({
+        id: "vehicle-ahead-stops",
+        type: "circle",
+        source: "vehicle-ahead",
+        filter: ["==", ["geometry-type"], "Point"],
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 3, 17, 6],
+          "circle-color": PALETTE.white,
+          "circle-stroke-color": ["get", "color"],
+          "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 12, 1.5, 17, 2.5],
+        },
+      });
+      map.addLayer({
+        id: "vehicle-ahead-times",
+        type: "symbol",
+        source: "vehicle-ahead",
+        filter: ["==", ["geometry-type"], "Point"],
+        layout: {
+          "text-field": ["step", ["zoom"], ["get", "when"], 16, ["concat", ["get", "name"], "\n", ["get", "when"]]],
+          "text-font": ["Noto Sans Regular"],
+          "text-size": 11,
+          "text-offset": [0, 1],
+          "text-anchor": "top",
+          "text-max-width": 9,
+          "text-optional": true,
+        },
+        paint: { "text-color": ["get", "color"], "text-halo-color": PALETTE.white, "text-halo-width": 1.6 },
       });
       // Spin vehicles in Spin orange: e-bikes solid and larger, scooters white with an orange ring;
       // the battery once zoomed in.
@@ -519,8 +642,10 @@ export function MapView(props: MapViewProps) {
   }, [ready, props.places, props.placeCategories, anchor?.[0], anchor?.[1]]);
 
   // Live trolleys and buses: a marker for each near campus (the map can't go further), in its line's
-  // color, with an arrow the way it's heading.
-  const trolleyMarkers = useRef(new Map<string, { marker: Marker; vehicle: LiveVehicle }>());
+  // color, with an arrow the way it's heading. Between updates each one keeps moving along its
+  // route at the speed it's been going, and eases onto each new report, so it moves smoothly and
+  // turns with the road instead of jumping.
+  const trolleyMarkers = useRef(new Map<string, Moving>());
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map) return;
@@ -529,34 +654,225 @@ export function MapView(props: MapViewProps) {
     const near = (v: LiveVehicle) => v.lngLat[0] > w - 0.03 && v.lngLat[0] < e + 0.03 && v.lngLat[1] > s - 0.03 && v.lngLat[1] < n + 0.03;
     const now = new Map((props.live?.vehicles ?? []).filter(near).map((v) => [v.id, v]));
     for (const [id, m] of markers) if (!now.has(id)) (m.marker.remove(), markers.delete(id));
+    const t = performance.now();
     for (const v of now.values()) {
       let m = markers.get(v.id);
       if (!m) {
         const el = vehicleElement(v);
-        m = { marker: new Marker({ element: el }).setLngLat(v.lngLat).addTo(map), vehicle: v };
+        m = {
+          marker: new Marker({ element: el }).setLngLat(v.lngLat).addTo(map),
+          vehicle: v,
+          path: null,
+          d: v.distanceAlong ?? 0,
+          t,
+          speed: 0,
+          speedFrom: 0,
+          offset: 0,
+          offsetAt: t,
+          glide: { from: v.lngLat, to: v.lngLat, start: 0 },
+        };
         el.addEventListener("click", (e) => {
           e.stopPropagation();
-          const { vehicle } = markers.get(v.id)!;
+          const { vehicle, marker } = markers.get(v.id)!;
           popup.current?.remove();
-          popup.current = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup", offset: 18 })
-            .setLngLat(vehicle.lngLat)
+          const shown = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup", offset: 18 })
+            .setLngLat(marker.getLngLat())
             .setDOMContent(vehicleCard(vehicle, trolleysAt.current))
             .addTo(map);
+          popup.current = shown;
+          // Follow this vehicle: its route ahead, until its popup closes.
+          selected.current = vehicle.id;
+          shown.on("close", () => {
+            if (selected.current !== vehicle.id) return;
+            selected.current = null;
+            showAhead(null);
+          });
+          void loadAhead(vehicle);
         });
         markers.set(v.id, m);
+        follow(m, v, t, true);
+      } else {
+        follow(m, v, t, false);
       }
-      m.vehicle = v;
-      m.marker.setLngLat(v.lngLat);
       const el = m.marker.getElement();
       el.style.setProperty("--line", v.color);
       el.title = `${v.line}${v.headsign ? ` to ${v.headsign}` : ""}`;
-      el.classList.toggle("has-heading", v.heading !== undefined);
-      el.dataset.heading = String(v.heading ?? 0);
+      el.classList.toggle("has-heading", v.heading !== undefined || !!m.path);
+      if (!m.path) el.dataset.heading = String(v.heading ?? 0);
     }
     trolleysAt.current = props.live?.at ?? Date.now();
     turnArrows();
+    // The followed vehicle: keep its card and route ahead up to date.
+    const followed = selected.current ? now.get(selected.current) : undefined;
+    missing.current = selected.current && !followed ? missing.current + 1 : 0;
+    if (selected.current && !followed && missing.current >= MISSING_UPDATES) {
+      // Gone for a while (trip over, or off the map): stop following it.
+      selected.current = null;
+      popup.current?.remove();
+      showAhead(null);
+    } else if (followed) {
+      popup.current?.setDOMContent(vehicleCard(followed, trolleysAt.current));
+      void loadAhead(followed);
+    }
+    if (markers.size && !gliding.current) gliding.current = requestAnimationFrame(glide);
   }, [ready, props.live]);
+
+  /** Take a new report for a marker: measure its speed along the route, and ease from where it's drawn. */
+  const follow = (m: Moving, v: LiveVehicle, t: number, fresh: boolean) => {
+    const sameTrip = !fresh && m.vehicle.tripId === v.tripId;
+    m.vehicle = v;
+    // Its route's path, once (fetched in the background; until then it glides in a straight line).
+    if (v.shapeId && m.pathFor !== v.shapeId) {
+      m.path = null;
+      m.pathFor = v.shapeId;
+      const shapeId = v.shapeId;
+      getShape(shapeId)
+        .then((points) => m.pathFor === shapeId && (m.path = measurePath(points)))
+        .catch(() => m.pathFor === shapeId && (m.pathFor = undefined));
+    }
+    // Progress along the route: its speed from the last report, and where it is now.
+    let shown: number | undefined;
+    if (v.distanceAlong !== undefined) {
+      shown = m.path && m.onPath && sameTrip ? alongNow(m, t) : undefined;
+      if (sameTrip && t - m.t > 2000) {
+        const measured = Math.max(0, Math.min(MAX_SPEED, (v.distanceAlong - m.d) / ((t - m.t) / 1000)));
+        // Change speed gently: from the speed it's going now, toward a damped new one, over the
+        // time to the next report.
+        m.speedFrom = speedNow(m, t);
+        m.speed = m.speed ? m.speed + (measured - m.speed) * SPEED_DAMPING : measured;
+      } else if (!sameTrip) {
+        m.speed = m.speedFrom = 0;
+      }
+      m.d = v.distanceAlong;
+      m.t = t;
+    }
+    if (v.distanceAlong === undefined || !m.path || reducedMotion()) {
+      // No route to follow yet (or no progress along it, or no animation wanted): glide, or jump, there.
+      const at = m.marker.getLngLat();
+      const from: LngLat = [at.lng, at.lat];
+      const far = haversine(from[0], from[1], v.lngLat[0], v.lngLat[1]) > GLIDE_MAX_METERS;
+      m.glide = far || reducedMotion() ? { from: v.lngLat, to: v.lngLat, start: 0 } : { from, to: v.lngLat, start: t };
+      if (far || reducedMotion()) m.marker.setLngLat(v.lngLat);
+      m.onPath = false;
+      return;
+    }
+    // Ease out the difference between where it's drawn and where it's reported, unless it's far off
+    // (or it's only now starting to follow its route).
+    const off = shown === undefined ? 0 : shown - (v.distanceAlong ?? 0);
+    m.offset = Math.abs(off) < GLIDE_MAX_METERS ? off : 0;
+    m.offsetAt = t;
+    if (!m.onPath || !sameTrip) m.shown = undefined;
+    m.onPath = true;
+    // Where its next stop is along the route: it's drawn stopping there until a report says it's left.
+    const stop = v.nextStop?.lngLat;
+    m.stopAlong = stop && m.path ? alongPath(m.path, stop, Math.max(0, (v.distanceAlong ?? 0) - 40)) : undefined;
+    m.glide = { from: v.lngLat, to: v.lngLat, start: 0 };
+  };
+
+  // Each frame: every vehicle a little further along its route (and the open popup with its vehicle).
+  const gliding = useRef(0);
+  const glide = (now: number) => {
+    gliding.current = 0;
+    const markers = trolleyMarkers.current;
+    const bearing = mapRef.current?.getBearing() ?? 0;
+    for (const [id, m] of markers) {
+      let at: LngLat | null = null;
+      if (m.path && m.onPath && !reducedMotion()) {
+        // Not past its next stop (it slows into it and waits for a report that it's left), and never
+        // backwards: a vehicle drawn ahead of its report eases off instead of reversing.
+        let along = alongNow(m, now);
+        if (m.stopAlong !== undefined && along > m.stopAlong - STOP_EASE_METERS) {
+          along = m.stopAlong - STOP_EASE_METERS * Math.exp(-(along - (m.stopAlong - STOP_EASE_METERS)) / STOP_EASE_METERS);
+        }
+        along = Math.max(m.shown ?? -Infinity, along);
+        m.shown = along;
+        const p = pointAlong(m.path, along);
+        at = p.lngLat;
+        const el = m.marker.getElement();
+        if (Math.abs(Number(el.dataset.heading) - p.heading) > 1) {
+          el.dataset.heading = String(p.heading);
+          el.style.setProperty("--heading", `${p.heading - bearing}deg`);
+        }
+      } else if (m.glide.start) {
+        const { from, to, start } = m.glide;
+        const t = Math.min(1, (now - start) / LIVE_REFRESH_MS);
+        at = [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t];
+        if (t >= 1) m.glide = { from: to, to, start: 0 };
+      }
+      if (!at) continue;
+      m.marker.setLngLat(at);
+      if (id === selected.current) popup.current?.setLngLat(at);
+    }
+    // The followed vehicle's route ahead, kept starting under it (a few times a second is plenty).
+    if (ahead.current && now - lastAheadDraw.current > 200) drawAhead(now);
+    if (markers.size) gliding.current = requestAnimationFrame(glide);
+  };
+  useEffect(() => () => cancelAnimationFrame(gliding.current), []);
   const trolleysAt = useRef(Date.now());
+  /** The trolley or bus whose route ahead is shown (its popup is open). */
+  const selected = useRef<string | null>(null);
+  /** The followed vehicle's route ahead (its stops and times), redrawn as it moves. */
+  const ahead = useRef<{ vehicleId: string; color: string; trip: TripAhead } | null>(null);
+  /** Updates in a row the followed vehicle has been missing from (MTS's answers are patchy). */
+  const missing = useRef(0);
+  const lastAheadDraw = useRef(0);
+  /** Show (or clear) a vehicle's route ahead. */
+  const showAhead = (next: { vehicle: LiveVehicle; trip: TripAhead } | null) => {
+    ahead.current = next && { vehicleId: next.vehicle.id, color: next.vehicle.color, trip: next.trip };
+    drawAhead(performance.now());
+  };
+  /**
+   * Draw the route ahead from where the vehicle is drawn right now: the line starts under it and
+   * shortens as it moves (nothing trails behind), and stops it has passed drop off.
+   */
+  const drawAhead = (now: number) => {
+    const map = mapRef.current;
+    if (!map) return;
+    lastAheadDraw.current = now;
+    const a = ahead.current;
+    if (!a) return source(map, "vehicle-ahead").setData(EMPTY);
+    const m = trolleyMarkers.current.get(a.vehicleId);
+    const at = m?.marker.getLngLat();
+    let line = a.trip.path;
+    let passed = -Infinity;
+    if (m?.path && m.onPath) {
+      passed = alongNow(m, now);
+      line = pathFrom(m.path, passed);
+    } else if (at && line.length > 1) {
+      line = [[at.lng, at.lat], ...line.slice(1)];
+    }
+    const clock = Date.now();
+    source(map, "vehicle-ahead").setData({
+      type: "FeatureCollection",
+      features: [
+        ...(line.length > 1 ? [{ ...lineFeature(line), properties: { color: a.color } }] : []),
+        ...a.trip.stops
+          .filter((s) => s.along > passed)
+          .map((s) => {
+            const min = Math.round((s.at - clock) / 60_000);
+            return {
+              type: "Feature" as const,
+              properties: {
+                color: a.color,
+                name: s.name,
+                when: min <= 0 ? "now" : min < 60 ? `${min} min` : new Date(s.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+              },
+              geometry: { type: "Point" as const, coordinates: s.lngLat },
+            };
+          }),
+      ],
+    });
+  };
+  const loadAhead = async (vehicle: LiveVehicle) => {
+    if (!vehicle.tripId) return;
+    try {
+      const trip = await fetchTripAhead(vehicle.tripId);
+      // Still following the same vehicle?
+      if (selected.current === vehicle.id) showAhead({ vehicle, trip });
+    } catch {
+      // Keep whatever's drawn; the next refresh tries again.
+    }
+  };
   // Arrows point the way on the map: allow for the map being rotated.
   const turnArrows = () => {
     const bearing = mapRef.current?.getBearing() ?? 0;
@@ -996,7 +1312,16 @@ function vehicleCard(v: LiveVehicle, feedAt: number): HTMLElement {
   } else {
     meta.textContent = v.predicted ? "Live position" : "Position from the timetable";
   }
-  el.append(title, meta);
+  // How fresh the position is: the last real GPS fix, with MTS's estimate along the route since.
+  const fix = document.createElement("span");
+  fix.className = "place-popup-meta";
+  if (v.fixAt) {
+    const ago = Math.max(0, Math.round((Date.now() - v.fixAt) / 1000));
+    fix.textContent = `GPS fix ${ago < 90 ? `${ago} s` : `${Math.round(ago / 60)} min`} ago; position since estimated by MTS from the timetable`;
+  } else {
+    fix.textContent = "No GPS fix: position estimated by MTS from the timetable";
+  }
+  el.append(title, meta, fix);
   return el;
 }
 
