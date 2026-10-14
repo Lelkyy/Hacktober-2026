@@ -27,7 +27,8 @@ describe("live trolleys and buses (OneBusAway vehicles-for-agency)", () => {
           { id: "MTS_t3", routeId: "NCTD_398", tripHeadsign: "Oceanside" },
         ],
         routes: [
-          { id: "MTS_510", shortName: "510", longName: "Blue Line", type: 0, color: "0F6BAF" },
+          // As MTS publishes them: trolleys named by color, the long name being the route's ends.
+          { id: "MTS_510", shortName: "Blue", longName: "San Ysidro - UTC", type: 0, color: "0000FF" },
           { id: "MTS_201", shortName: "201", type: 3 },
           { id: "NCTD_398", shortName: "398", type: 2 },
         ],
@@ -41,11 +42,11 @@ describe("live trolleys and buses (OneBusAway vehicles-for-agency)", () => {
       {
         id: "MTS_4012",
         mode: "trolley",
-        route: "510",
+        route: "Blue",
         lngLat: [-117.2235, 32.8711],
         heading: 0,
         line: "Blue Line",
-        color: "#0F6BAF",
+        color: "#0000FF",
         headsign: "UTC",
         nextStop: { name: "Nobel Drive", inSeconds: 180 },
         predicted: true,

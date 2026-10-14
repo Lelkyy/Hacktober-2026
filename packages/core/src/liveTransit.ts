@@ -12,7 +12,7 @@ export interface LiveVehicle {
   lngLat: LngLat;
   /** Compass heading in degrees (0 = north, 90 = east), when the feed says. */
   heading?: number;
-  /** "Blue Line" (or the route's short name). */
+  /** What riders call it: "Blue Line" for a trolley (MTS names them by color), the route number for a bus. */
   line: string;
   /** Line color, "#rrggbb". */
   color: string;
@@ -73,7 +73,7 @@ export function liveVehicles(response: ObaResponse): LiveVehicle[] {
       route: route.shortName || route.id,
       lngLat: [at.lon, at.lat],
       heading: s?.orientation !== undefined ? (((90 - s.orientation) % 360) + 360) % 360 : undefined,
-      line: route.longName || route.shortName || route.id,
+      line: mode === "trolley" && route.shortName ? `${route.shortName} Line` : route.shortName || route.longName || route.id,
       color: route.color ? `#${route.color.replace(/^#/, "")}` : "#4A6497",
       headsign: trip.tripHeadsign,
       nextStop: next && s?.nextStopTimeOffset !== undefined ? { name: next.name, inSeconds: s.nextStopTimeOffset } : undefined,
