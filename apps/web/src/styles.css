@@ -236,7 +236,8 @@ button.link.danger { color: var(--danger); }
 
 /* Live trolleys and buses: a badge in the line's color, with an arrow the way it's heading */
 .live-chip.loading svg { animation: spin-pulse 1s ease-in-out infinite; }
-.trolley { position: relative; width: 30px; height: 30px; cursor: pointer; }
+/* (Marker roots keep MapLibre's own absolute positioning: overriding it makes them slide when zooming.) */
+.trolley { width: 30px; height: 30px; cursor: pointer; }
 .trolley-badge {
   position: absolute;
   inset: 2px;
@@ -771,7 +772,7 @@ button.start { width: 100%; padding: 11px; font-size: 15px; border-radius: 999px
 .steps li.current .step-icon { color: var(--accent); }
 
 /* You: a dot, with a cone for the way you face (the marker rotates it; up is the heading). */
-.viewpoint { position: relative; width: 72px; height: 72px; display: grid; place-items: center; pointer-events: none; }
+.viewpoint { width: 72px; height: 72px; display: grid; place-items: center; pointer-events: none; }
 .viewpoint-cone {
   position: absolute;
   inset: 0;
