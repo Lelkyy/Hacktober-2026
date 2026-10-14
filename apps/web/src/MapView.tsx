@@ -270,7 +270,8 @@ export function MapView(props: MapViewProps) {
         id: "topo",
         type: "raster",
         source: "topo",
-        paint: { "raster-saturation": -0.45, "raster-brightness-max": 0.97 },
+        // New tiles swap in at once: cross-fading them lets the pale background flash through.
+        paint: { "raster-saturation": -0.45, "raster-brightness-max": 0.97, "raster-fade-duration": 0 },
       });
       // UCSD's own ground-level campus drawing (lawns, walkways, buildings...), in the app's palette.
       map.addSource("ucsd", { type: "vector", tiles: [UCSD_VECTOR_TILES], minzoom: 0, maxzoom: 16 });
@@ -285,7 +286,14 @@ export function MapView(props: MapViewProps) {
         bounds: [-117.26, 32.855, -117.2, 32.895],
         attribution: "Illustrated map © UC San Diego",
       });
-      map.addLayer({ id: "illustrated", type: "raster", source: "illustrated", layout: { visibility: "none" } });
+      map.addLayer({
+        id: "illustrated",
+        type: "raster",
+        source: "illustrated",
+        layout: { visibility: "none" },
+        // As for the topo tiles: no cross-fade, which flashes the drawing's buildings white while zooming.
+        paint: { "raster-fade-duration": 0 },
+      });
       // The drawing stops abruptly: a soft band of the surrounding green along its outline (traced
       // from its tiles) blends it into the map around it. ~40 m wide on the ground at every zoom.
       map.addSource("illustrated-edge", { type: "geojson", data: "/data/illustrated-edge.json" });
