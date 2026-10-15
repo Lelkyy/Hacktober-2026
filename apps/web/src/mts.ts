@@ -1,25 +1,53 @@
-import { decodePolyline, liveVehicles, tripAhead, type LiveVehicle, type LngLat, type TripAhead } from "@campus/core";
+import {
+  decodePolyline,
+  decodeVehiclePositions,
+  liveVehicles,
+  tripAhead,
+  type LiveRoute,
+  type LiveVehicle,
+  type LngLat,
+  type TripAhead,
+} from "@campus/core";
 
 /**
- * MTS real-time data (https://www.sdmts.com/business-center/app-developers/real-time-data),
- * through its OneBusAway API. It needs a key from MTS's request form, set as VITE_MTS_KEY
- * (e.g. in apps/web/.env.local, which stays out of git). Use is under MTS's developer license
- * agreement.
+ * MTS real-time data (https://www.sdmts.com/business-center/app-developers/real-time-data):
+ * vehicle positions from its GTFS-realtime feed (~20 KB for the whole fleet, against ~650 KB for
+ * the same from its OneBusAway API), and trips and routes from the OneBusAway API, asked for only
+ * when needed. It needs a key from MTS's request form, set as VITE_MTS_KEY (e.g. in
+ * apps/web/.env.local, which stays out of git). Use is under MTS's developer license agreement.
  */
 const KEY: string | undefined = import.meta.env.VITE_MTS_KEY || undefined;
 const API = "https://realtime.sdmts.com/api/api/where";
+const POSITIONS = "https://realtime.sdmts.com/api/api/gtfs_realtime/vehicle-positions-for-agency/MTS.pb";
 export const MTS_LIVE = !!KEY;
 /**
- * How often to ask again while trolleys or buses are shown. MTS works each position out afresh
- * on every request (from the last report and the timetable), so asking often keeps them moving.
+ * How often to ask while trolleys or buses are shown. MTS publishes new fixes in batches every
+ * 30–40 s, each already a little old; asking every 10 s shows a batch within 10 s of it coming out.
  */
 export const LIVE_REFRESH_MS = 10_000;
 
-/** Every trolley and bus running now, and when the answer is from (times in it count from then). */
-export async function fetchLiveVehicles(): Promise<{ vehicles: LiveVehicle[]; at: number }> {
+/** MTS's routes (names, colors, trolley or bus): fetched once. */
+let routes: Promise<Map<string, LiveRoute>> | null = null;
+const loadRoutes = () => {
+  routes ??= get("routes-for-agency/MTS.json").then((r) => new Map(((r.data as { list?: LiveRoute[] }).list ?? []).map((x) => [x.id, x])));
+  routes.catch(() => (routes = null));
+  return routes;
+};
+
+/**
+ * Every trolley and bus at its last GPS fix, and when the feed was made. `before` (the last
+ * answer, by vehicle) gives each one's heading from how it moved.
+ */
+export async function fetchLiveVehicles(before?: Map<string, LiveVehicle>): Promise<{ vehicles: LiveVehicle[]; at: number }> {
   if (!KEY) throw new Error("No MTS real-time key (VITE_MTS_KEY)");
-  const json = await get("vehicles-for-agency/MTS.json");
-  return { vehicles: liveVehicles(json as Parameters<typeof liveVehicles>[0]), at: json.currentTime ?? Date.now() };
+  const [byId, feed] = await Promise.all([
+    loadRoutes(),
+    fetch(`${POSITIONS}?key=${encodeURIComponent(KEY)}`, { signal: AbortSignal.timeout(20_000) }).then(async (res) => {
+      if (!res.ok) throw new Error(`MTS vehicle positions: HTTP ${res.status}`);
+      return decodeVehiclePositions(new Uint8Array(await res.arrayBuffer()));
+    }),
+  ]);
+  return { vehicles: liveVehicles(feed.fixes, byId, { before }), at: feed.at || Date.now() };
 }
 
 /** Trip paths by shape id: they don't change, so each is fetched once. */
@@ -51,14 +79,14 @@ export function getShape(shapeId: string): Promise<LngLat[]> {
   return shape;
 }
 
-/** Where a trip's vehicle still has to go: the path ahead and the stops to come, with predicted times. */
-export async function fetchTripAhead(tripId: string): Promise<TripAhead> {
+/** Where a trip's vehicle still has to go from its fix `at`: the path ahead and the stops to come, with MTS's times. */
+export async function fetchTripAhead(tripId: string, at: LngLat): Promise<TripAhead> {
   const details = await get(`trip-details/${encodeURIComponent(tripId)}.json`, "&includeSchedule=true&includeStatus=true");
   const trip = (details.data as { references?: { trips?: { id: string; shapeId?: string }[] } } | undefined)?.references?.trips?.find(
     (t) => t.id === tripId,
   );
   const path = trip?.shapeId ? await getShape(trip.shapeId).catch(() => []) : [];
-  return tripAhead(details as Parameters<typeof tripAhead>[0], path);
+  return tripAhead(details as Parameters<typeof tripAhead>[0], path, at);
 }
 
 async function get(method: string, extra = ""): Promise<{ currentTime?: number; code?: number; text?: string; data?: unknown }> {

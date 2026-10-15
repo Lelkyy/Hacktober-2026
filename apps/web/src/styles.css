@@ -253,6 +253,23 @@ button.link.danger { color: var(--danger); }
 .trolley.bus { width: 28px; height: 28px; }
 .trolley-arrow { position: absolute; inset: -9px; transform: rotate(var(--heading, 0deg)); display: none; pointer-events: none; }
 .trolley.has-heading .trolley-arrow { display: block; }
+/* How long ago the position was taken, under the badge. */
+.trolley-age {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 1px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #3d3d3d;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 13px;
+  white-space: nowrap;
+  pointer-events: none;
+}
 .trolley-arrow::before {
   content: "";
   position: absolute;

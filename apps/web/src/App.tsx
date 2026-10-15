@@ -322,7 +322,13 @@ export function App() {
     }
     let stopped = false;
     let first = true;
+    let busy = false;
+    let lastLoad = 0;
     const load = () => {
+      // Hidden tab, a request still out, or fresh enough already: skip.
+      if (document.visibilityState === "hidden" || busy || Date.now() - lastLoad < SPIN_REFRESH_MS - 500) return;
+      busy = true;
+      lastLoad = Date.now();
       setSpinLoading(true);
       fetchSpinVehicles()
         .then((bikes) => {
@@ -332,7 +338,10 @@ export function App() {
           first = false;
         })
         .catch(() => !stopped && first && spinOn && setHint("Couldn't load Spin vehicles. Try again in a moment."))
-        .finally(() => !stopped && setSpinLoading(false));
+        .finally(() => {
+          busy = false;
+          if (!stopped) setSpinLoading(false);
+        });
     };
     load();
     const timer = setInterval(load, SPIN_REFRESH_MS);
@@ -428,17 +437,30 @@ export function App() {
     }
     let stopped = false;
     let first = true;
+    // The last answer, by vehicle: headings come from how each one moved since.
+    let before = new Map<string, LiveVehicle>();
+    // One request at a time, and none sooner than the refresh interval after the last.
+    let busy = false;
+    let lastLoad = 0;
     const load = () => {
+      // Nothing to show in a hidden tab: don't download.
+      if (document.visibilityState === "hidden" || busy || Date.now() - lastLoad < LIVE_REFRESH_MS - 500) return;
+      busy = true;
+      lastLoad = Date.now();
       setLiveLoading(true);
-      fetchLiveVehicles()
+      fetchLiveVehicles(before)
         .then((t) => {
           if (stopped) return;
+          before = new Map(t.vehicles.map((v) => [v.id, v]));
           setLive(t);
           if (first && !t.vehicles.length) setHint("No trolleys or buses are running right now.");
           first = false;
         })
         .catch(() => !stopped && first && setHint("Couldn't load live trolleys and buses from MTS. Try again in a moment."))
-        .finally(() => !stopped && setLiveLoading(false));
+        .finally(() => {
+          busy = false;
+          if (!stopped) setLiveLoading(false);
+        });
     };
     load();
     const timer = setInterval(load, LIVE_REFRESH_MS);

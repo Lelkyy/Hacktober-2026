@@ -2,106 +2,167 @@ import { haversine } from "./geo.ts";
 import type { LngLat } from "./types.ts";
 
 /**
- * Live transit vehicles from a OneBusAway API (`where/vehicles-for-agency/{agency}.json`), as MTS
- * publishes for San Diego: where each trolley and bus is, which way it's heading and its next stop.
+ * Live trolleys and buses where they last reported: MTS's GTFS-realtime vehicle positions (one
+ * small protobuf for the whole fleet), each vehicle at its GPS fix as reported, with when the fix
+ * was taken. Nothing is estimated: a vehicle stays at its fix until the next one comes.
  */
 export interface LiveVehicle {
   id: string;
-  /** The trip it's running, for its route ahead (`tripAhead`). */
+  /** The trip it's running (OneBusAway id, "MTS_<trip>"), for its route ahead (`tripAhead`). */
   tripId?: string;
-  /** The trip's path (OneBusAway `where/shape`), and how far along it the vehicle is, in meters. */
-  shapeId?: string;
-  distanceAlong?: number;
   mode: "trolley" | "bus";
   /** The route's number ("201", "510"). */
   route: string;
+  /** Its GPS fix. */
   lngLat: LngLat;
-  /** Compass heading in degrees (0 = north, 90 = east), when the feed says. */
+  /** When the fix was taken (ms since the epoch). */
+  fixAt: number;
+  /** Compass heading (0 = north), from its last two fixes, once it has moved between them. */
   heading?: number;
   /** What riders call it: "Blue Line" for a trolley (MTS names them by color), the route number for a bus. */
   line: string;
   /** Line color, "#rrggbb". */
   color: string;
-  /** Where it's going ("UTC"). */
-  headsign?: string;
-  nextStop?: { name: string; lngLat?: LngLat; /** Seconds from the feed's time until it gets there. */ inSeconds: number };
-  /** When its last real GPS fix was taken (ms since the epoch); its position since is MTS's estimate. */
-  fixAt?: number;
-  /** Whether the times are live predictions rather than the timetable. */
-  predicted: boolean;
 }
 
-interface ObaVehicle {
+/** One vehicle's report in a GTFS-realtime VehiclePosition feed. */
+export interface VehicleFix {
   vehicleId: string;
   tripId?: string;
-  location?: { lat: number; lon: number };
-  tripStatus?: {
-    activeTripId?: string;
-    position?: { lat: number; lon: number };
-    distanceAlongTrip?: number;
-    /** OneBusAway: degrees counterclockwise from east (0 = east, 90 = north). */
-    orientation?: number;
-    nextStop?: string;
-    nextStopTimeOffset?: number;
-    predicted?: boolean;
-    lastLocationUpdateTime?: number;
-  };
+  routeId?: string;
+  lngLat: LngLat;
+  /** When the fix was taken (ms since the epoch). */
+  at: number;
+  /** Compass bearing, when the feed gives one (MTS's doesn't). */
+  bearing?: number;
 }
-interface ObaResponse {
-  data?: {
-    list?: ObaVehicle[];
-    references?: {
-      trips?: { id: string; routeId: string; tripHeadsign?: string; shapeId?: string }[];
-      routes?: { id: string; shortName?: string; longName?: string; type?: number; color?: string }[];
-      stops?: { id: string; name: string; lat?: number; lon?: number }[];
+
+/**
+ * The vehicle reports in a GTFS-realtime FeedMessage (protobuf): for each entity with a
+ * VehiclePosition, its vehicle, trip, route, position and timestamp. Just enough of the format
+ * to read them, so no protobuf library.
+ */
+export function decodeVehiclePositions(bytes: Uint8Array): { at: number; fixes: VehicleFix[] } {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // Calls back with each field in [start, end): its number, and a number, or a [start, end) for bytes.
+  const fields = (start: number, end: number, cb: (field: number, value: number | [number, number]) => void) => {
+    let i = start;
+    const varint = () => {
+      let [n, scale] = [0, 1];
+      let b: number;
+      do {
+        b = bytes[i++];
+        n += (b & 0x7f) * scale;
+        scale *= 128;
+      } while (b & 0x80);
+      return n;
     };
+    while (i < end) {
+      const key = varint();
+      const [field, wire] = [Math.floor(key / 8), key & 7];
+      if (wire === 0) cb(field, varint());
+      else if (wire === 2) {
+        const len = varint();
+        cb(field, [i, i + len]);
+        i += len;
+      } else if (wire === 5) {
+        cb(field, view.getFloat32(i, true));
+        i += 4;
+      } else if (wire === 1) {
+        cb(field, view.getFloat64(i, true));
+        i += 8;
+      } else throw new Error(`GTFS-realtime: unsupported wire type ${wire}`);
+    }
   };
+  // Ids are plain ASCII.
+  const str = (r: number | [number, number]) => (typeof r === "number" ? "" : String.fromCharCode(...bytes.subarray(r[0], r[1])));
+  const sub = (r: number | [number, number], cb: (field: number, value: number | [number, number]) => void) => typeof r !== "number" && fields(r[0], r[1], cb);
+  let at = 0;
+  const fixes: VehicleFix[] = [];
+  fields(0, bytes.length, (f, v) => {
+    if (f === 1) sub(v, (g, x) => g === 3 && typeof x === "number" && (at = x * 1000));
+    if (f !== 2) return;
+    sub(v, (g, x) => {
+      if (g !== 4) return;
+      const fix: Partial<VehicleFix> & { lat?: number; lon?: number; label?: string } = {};
+      sub(x, (h, y) => {
+        if (h === 1) sub(y, (k, z) => (k === 1 ? (fix.tripId = str(z)) : k === 5 ? (fix.routeId = str(z)) : undefined));
+        else if (h === 2) sub(y, (k, z) => (k === 1 ? (fix.lat = z as number) : k === 2 ? (fix.lon = z as number) : k === 3 ? (fix.bearing = z as number) : undefined));
+        else if (h === 5 && typeof y === "number") fix.at = y * 1000;
+        else if (h === 8) sub(y, (k, z) => (k === 1 ? (fix.vehicleId = str(z)) : k === 2 ? (fix.label = str(z)) : undefined));
+      });
+      const id = fix.vehicleId || fix.label;
+      if (id && fix.lat !== undefined && fix.lon !== undefined && fix.at) {
+        fixes.push({
+          vehicleId: id,
+          ...(fix.tripId ? { tripId: fix.tripId } : {}),
+          ...(fix.routeId ? { routeId: fix.routeId } : {}),
+          lngLat: [fix.lon, fix.lat],
+          at: fix.at,
+          ...(fix.bearing !== undefined ? { bearing: fix.bearing } : {}),
+        });
+      }
+    });
+  });
+  return { at, fixes };
+}
+
+/** A route from OneBusAway's routes-for-agency list. */
+export interface LiveRoute {
+  id: string;
+  shortName?: string;
+  longName?: string;
+  /** GTFS route type: 0 tram (MTS's trolleys), 3 bus. */
+  type?: number;
+  color?: string;
 }
 
 /** GTFS route types: tram, streetcar and light rail (MTS's trolley lines); bus. */
 const MODES: Record<number, LiveVehicle["mode"]> = { 0: "trolley", 3: "bus" };
+/** A fix older than this is a vehicle out of service (they linger in the feed for hours). */
+export const STALE_FIX_MS = 5 * 60_000;
 
-/** The trolleys and buses running a trip, from a vehicles-for-agency response. */
-export function liveVehicles(response: ObaResponse): LiveVehicle[] {
-  const refs = response.data?.references ?? {};
-  const trips = new Map((refs.trips ?? []).map((t) => [t.id, t]));
-  const routes = new Map((refs.routes ?? []).map((r) => [r.id, r]));
-  const stops = new Map((refs.stops ?? []).map((s) => [s.id, s]));
-  const out: LiveVehicle[] = [];
-  for (const v of response.data?.list ?? []) {
-    const trip = trips.get(v.tripStatus?.activeTripId ?? v.tripId ?? "");
-    const route = trip && routes.get(trip.routeId);
+/**
+ * Trolleys and buses from their fixes, named from the agency's routes (OneBusAway ids, the feed's
+ * ids with the agency in front: "MTS_510"). Vehicles not on a trolley or bus route, or with a
+ * stale fix, are left out. A vehicle's heading comes from its previous fix, when it has moved.
+ */
+export function liveVehicles(
+  fixes: VehicleFix[],
+  routes: Map<string, LiveRoute>,
+  opts: { agency?: string; now?: number; before?: Map<string, LiveVehicle> } = {},
+): LiveVehicle[] {
+  const agency = opts.agency ?? "MTS";
+  const now = opts.now ?? Date.now();
+  return fixes.flatMap((f): LiveVehicle[] => {
+    const route = f.routeId ? routes.get(`${agency}_${f.routeId}`) : undefined;
     const mode = route?.type !== undefined ? MODES[route.type] : undefined;
-    if (!trip || !route || !mode) continue;
-    const at = v.tripStatus?.position ?? v.location;
-    if (!at) continue;
-    const s = v.tripStatus;
-    const next = s?.nextStop ? stops.get(s.nextStop) : undefined;
-    out.push({
-      id: v.vehicleId,
-      tripId: trip.id,
-      shapeId: trip.shapeId,
-      distanceAlong: s?.distanceAlongTrip,
-      mode,
-      route: route.shortName || route.id,
-      lngLat: [at.lon, at.lat],
-      heading: s?.orientation !== undefined ? (((90 - s.orientation) % 360) + 360) % 360 : undefined,
-      line: mode === "trolley" && route.shortName ? `${route.shortName} Line` : route.shortName || route.longName || route.id,
-      color: route.color ? `#${route.color.replace(/^#/, "")}` : "#4A6497",
-      headsign: trip.tripHeadsign,
-      nextStop:
-        next && s?.nextStopTimeOffset !== undefined
-          ? {
-              name: next.name,
-              lngLat: next.lat !== undefined && next.lon !== undefined ? [next.lon, next.lat] : undefined,
-              inSeconds: s.nextStopTimeOffset,
-            }
-          : undefined,
-      fixAt: s?.lastLocationUpdateTime || undefined,
-      predicted: !!s?.predicted,
-    });
-  }
-  return out;
+    if (!route || !mode || now - f.at > STALE_FIX_MS) return [];
+    const prev = opts.before?.get(f.vehicleId);
+    const moved = prev && prev.fixAt !== f.at ? haversine(prev.lngLat[0], prev.lngLat[1], f.lngLat[0], f.lngLat[1]) : 0;
+    const heading = f.bearing ?? (prev && moved >= MOVED_METERS ? compassBearing(prev.lngLat, f.lngLat) : prev?.heading);
+    return [
+      {
+        id: f.vehicleId,
+        ...(f.tripId ? { tripId: `${agency}_${f.tripId}` } : {}),
+        mode,
+        route: route.shortName || route.id,
+        lngLat: f.lngLat,
+        fixAt: f.at,
+        ...(heading !== undefined ? { heading } : {}),
+        line: mode === "trolley" && route.shortName ? `${route.shortName} Line` : route.shortName || route.longName || route.id,
+        color: route.color ? `#${route.color.replace(/^#/, "")}` : "#4A6497",
+      },
+    ];
+  });
+}
+
+/** Moving less than this between fixes (GPS wander) doesn't change a vehicle's heading. */
+const MOVED_METERS = 12;
+
+function compassBearing(a: LngLat, b: LngLat): number {
+  const k = Math.cos((a[1] * Math.PI) / 180);
+  return ((Math.atan2((b[0] - a[0]) * k, b[1] - a[1]) * 180) / Math.PI + 360) % 360;
 }
 
 /** Points of a Google encoded polyline (as OneBusAway's `where/shape` gives a trip's path). */
@@ -127,6 +188,8 @@ export function decodePolyline(encoded: string): LngLat[] {
 
 /** The rest of a vehicle's trip: the path still ahead of it, and each stop to come with when it gets there. */
 export interface TripAhead {
+  /** Where it's going ("UTC"). */
+  headsign?: string;
   path: LngLat[];
   stops: {
     id: string;
@@ -142,25 +205,30 @@ export interface TripAhead {
 interface ObaTripDetails {
   data?: {
     entry?: {
+      tripId?: string;
       serviceDate?: number;
       schedule?: { stopTimes?: { stopId: string; arrivalTime: number; distanceAlongTrip: number }[] };
-      status?: { distanceAlongTrip?: number; scheduleDeviation?: number; serviceDate?: number; position?: { lat: number; lon: number } };
+      status?: { distanceAlongTrip?: number; scheduleDeviation?: number; serviceDate?: number };
     };
-    references?: { stops?: { id: string; name: string; lat: number; lon: number }[] };
+    references?: { stops?: { id: string; name: string; lat: number; lon: number }[]; trips?: { id: string; tripHeadsign?: string }[] };
   };
 }
 
 /**
  * Where a vehicle still has to go, from a trip-details response (with schedule and status) and
- * the trip's path: the path from its distance along the trip to the end, and the stops after
- * that point, each at its timetabled arrival plus the vehicle's current delay.
+ * the trip's path: the path on from its GPS fix `at` (the nearest point of the path, looking no
+ * more than 2 km behind where MTS reckons it is, for routes that loop back), and the stops after
+ * that, each at its timetabled arrival plus the vehicle's current delay (MTS's figures).
  */
-export function tripAhead(details: ObaTripDetails, path: LngLat[]): TripAhead {
+export function tripAhead(details: ObaTripDetails, path: LngLat[], at?: LngLat): TripAhead {
   const entry = details.data?.entry;
   const status = entry?.status;
-  const along = status?.distanceAlongTrip ?? 0;
   const day = status?.serviceDate ?? entry?.serviceDate ?? 0;
   const delay = status?.scheduleDeviation ?? 0;
+  const headsign = details.data?.references?.trips?.find((t) => t.id === entry?.tripId)?.tripHeadsign;
+  const measured = measurePath(path);
+  const reckoned = status?.distanceAlongTrip ?? 0;
+  const along = at && path.length > 1 ? alongPath(measured, at, Math.max(0, reckoned - 2000)) : reckoned;
   const stopRefs = new Map((details.data?.references?.stops ?? []).map((s) => [s.id, s]));
   const stops = (entry?.schedule?.stopTimes ?? [])
     .filter((t) => t.distanceAlongTrip > along)
@@ -168,22 +236,10 @@ export function tripAhead(details: ObaTripDetails, path: LngLat[]): TripAhead {
       const s = stopRefs.get(t.stopId);
       return s ? [{ id: s.id, name: s.name, lngLat: [s.lon, s.lat] as LngLat, at: day + (t.arrivalTime + delay) * 1000, along: t.distanceAlongTrip }] : [];
     });
-  // Cut the path where the vehicle is: walk it until the distance along the trip is reached.
-  const ahead: LngLat[] = [];
-  let walked = 0;
-  for (let k = 1; k < path.length; k++) {
-    const [a, b] = [path[k - 1], path[k]];
-    const m = haversine(a[0], a[1], b[0], b[1]);
-    if (!ahead.length && walked + m >= along) {
-      const t = m ? (along - walked) / m : 0;
-      ahead.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
-    }
-    if (ahead.length) ahead.push(b);
-    walked += m;
-  }
-  // Start from where the vehicle is drawn, when the feed says.
-  if (status?.position && ahead.length) ahead[0] = [status.position.lon, status.position.lat];
-  return { path: ahead, stops };
+  const ahead = path.length > 1 ? pathFrom(measured, along) : [];
+  // Starting right at the vehicle.
+  if (at && ahead.length) ahead[0] = at;
+  return { ...(headsign ? { headsign } : {}), path: ahead, stops };
 }
 
 /** A path with the distance from its start to each point, for finding a point a distance along it. */

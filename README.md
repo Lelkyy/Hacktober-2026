@@ -53,9 +53,10 @@ the way, using the paths, stairs and bike paths students actually use.
 - **Two campus maps:** the official campus map (district names and campus
   boundary) or UC San Diego's illustrated one, moved onto true positions (it's
   drawn ~4 m off) so routes sit on its walkways.
-- **Live trolleys and buses:** every trolley and nearby bus on the map as it
-  moves, which way it's heading, and when it reaches its next stop (needs an
-  MTS real-time API key).
+- **Live trolleys and buses:** trolleys and buses around the map's view at
+  their last GPS fix, with how long ago it was taken and which way they're
+  going; tap one for its route ahead and next stop (needs an MTS real-time API
+  key).
 - **Spin e-bikes and scooters:** tap the spin button to see every Spin e-bike
   and scooter free to ride, with battery, range and directions.
 - **Spin scooter trips:** walk to the best free scooter, ride, park at a Spin
