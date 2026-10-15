@@ -13,6 +13,7 @@ import {
   type TripAhead,
 } from "@campus/core";
 import { fetchTripAhead, getShape, LIVE_REFRESH_MS } from "./mts.ts";
+import { ILLUSTRATED_TILES, registerIllustratedTiles } from "./illustratedTiles.ts";
 import {
   GeolocateControl,
   LngLatBounds,
@@ -34,8 +35,6 @@ import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import { useEffect, useRef, useState } from "react";
 
 const BASE_STYLE = "https://tiles.openfreemap.org/styles/liberty";
-/** UC San Diego's illustrated campus map (by Concept3D, the old maps.ucsd.edu); TMS rows. */
-const ILLUSTRATED_TILES = "https://assets.concept3d.com/assets/1005/1005_Map_9/{z}/{x}/{y}";
 /** Esri's topographic map, which the official ArcGIS campus map is drawn on. */
 const TOPO_TILES = "https://services.arcgisonline.com/arcgis/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}";
 /** UC San Diego's campus vector tiles, for its district names and campus boundary. */
@@ -153,6 +152,7 @@ const KEEP_RIGHT_OFFSET: ExpressionSpecification = [
 ];
 
 setWorkerUrl(workerUrl);
+registerIllustratedTiles();
 
 const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
@@ -278,8 +278,8 @@ export function MapView(props: MapViewProps) {
       for (const layer of UCSD_GROUND) map.addLayer(layer);
       map.addSource("illustrated", {
         type: "raster",
+        // UCSD's drawing, moved onto true positions (see illustratedTiles.ts).
         tiles: [ILLUSTRATED_TILES],
-        scheme: "tms",
         tileSize: 256,
         minzoom: 13,
         maxzoom: 20,

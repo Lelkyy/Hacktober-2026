@@ -9,7 +9,7 @@
 | `npm test` | Routing, schedule and data-coverage tests (includes the real campus data) |
 | `npm run typecheck` | TypeScript across all packages |
 | `npm run build:graph` | Rebuild the map data from cached downloads + edits + private schedule |
-| `npm run fetch:osm` | Re-download OpenStreetMap data, the shuttle timetable, UCSD's ground plan and the elevation tiles, then rebuild |
+| `npm run fetch:osm` | Re-download OpenStreetMap data, the shuttle timetable, UCSD's ground plan, the illustrated map's tiles and the elevation tiles, then rebuild |
 | `npm run fetch:places` | Re-download UCSD's campus places (restrooms, food, water, bike racks...) into `apps/web/public/data/campus-places.json` |
 | `npm run fetch:rooms` | Re-scrape building/room lists from the old public Schedule of Classes (terms up to Summer 2026) |
 
@@ -19,9 +19,10 @@
 OpenStreetMap (Overpass) ──┐
 Triton Transit GTFS ───────┤
 UCSD ground plan ──────────┤
+UCSD illustrated map ──────┤
 data/custom-paths.geojson ─┤
 data/blocked-ways.json ────┼─► scripts/build-graph.ts ─► apps/web/public/data/
-data/building-codes.json ──┤                               graph · buildings · transit · sections*
+data/building-codes.json ──┤                               graph · buildings · transit · sections* · illustrated-warp
 data/rooms.json ───────────┤                               │
 data/private/* (TSS) ──────┘                               ▼
                                      packages/core  routing, schedule, sections, search
@@ -155,8 +156,31 @@ data/private/* (TSS) ──────┘                               ▼
       so a bike can pull up beside a building on a road that has no sidewalk to
       walk.
   - Only buildings inside the OSM campus boundary are included. Each building
-    gets route targets: mapped entrances when OSM has them, otherwise path
-    points along its walls.
+    gets route targets: mapped entrances when OSM has them, else doors traced
+    from the walkways, else path points along its walls.
+  - **Traced doors** (`tracedDoors`, `Entrance.traced`): few buildings have
+    doors in OSM, so the rest get one wherever a walkway or plaza runs straight
+    up to the outline, walkable all the way 6 m out (a sidewalk passing along a
+    wall stops at a lawn or the street, so isn't one). Walkways come from UCSD's
+    ground plan, or, where it has nothing, from the illustrated map (below).
+    One door per stretch of wall a walkway meets, one every 30 m along a plaza,
+    none closer than 8 m. Each joins the nearest path node within 12 m with
+    nothing in the way. A building whose doors are only reached by steps keeps
+    its path points too, so bikes and "No stairs" still get there.
+  - **The illustrated map** (`scripts/illustrated.ts`; Concept3D tiles cached in
+    `data/raw/illustrated/`, zoom 17, half a meter a pixel): its neutral greys
+    read as streets (dark), walkways (off-white) and roofs (mid). It's drawn by
+    hand and sits ~4 m west-northwest of true positions over most of campus, so
+    `measureWarp` finds the shift that best lines its streets and walkways up
+    with the ground plan's, in 96 m windows every 48 m (searched ±16 m, kept
+    when the correlation is 0.45 or more), and takes the median of those within
+    300 m of each point of a 50 m grid. The grid goes to
+    `apps/web/public/data/illustrated-warp.json` (`DrawingWarp` in core: meters
+    east and north the drawing is from the ground), used by the doors above and
+    by the app to bend the drawing back. Checked by eye against the drawing:
+    with the offset taken out, the graph's paths run along the drawn walkways;
+    the few drawn walkways it lacks are mostly roofs, the trolley viaduct and
+    road shoulders read as walkway, so nothing is traced from it.
   - **UC San Diego's building list** (the public Campus Map's
     `Buildings_Public` layers, used with the campus GIS team's OK; cached in
     `data/raw/ucsd-building*.geojson`, refreshed with `--refresh`) adds official
@@ -310,7 +334,11 @@ Inside a building, or within 10 m of its walls (`buildingAt`; GPS wanders in
 and around buildings), you're pinned in it. Your dot sits at the building's
 middle (`buildingCentre`), and a trip from "My location" leaves by the
 building's doors, like a trip from the building itself (`Endpoint` point with
-`building`). Live navigation still follows the raw GPS.
+`building`): the route is drawn from your dot to the door it leaves by, then on
+to the paths (`doorWalks`), and starts "Leave York Hall by the entrance on the
+north side". A pin dropped inside a building works the same, at either end. A
+trip to the building you're already in says so instead. Live navigation still
+follows the raw GPS.
 
 ## Map styles and places
 
@@ -329,7 +357,11 @@ The **Map** button picks one of two campus maps (kept in `localStorage`,
   (Raising `raster-contrast` on the tiles only bleaches their light colors.)
 - **Illustrated:** UC San Diego's drawn campus map, the Concept3D tiles behind
   the old maps.ucsd.edu (`assets.concept3d.com/assets/1005/1005_Map_9`, TMS
-  rows, zoom 13 to 20). Around it, where the drawing stops, OpenStreetMap is
+  rows, zoom 13 to 20), bent back onto true positions so routes, doors and your
+  dot sit on its walkways (`illustratedTiles.ts`, an `illustrated://` tile
+  protocol): each tile is redrawn from the drawing's tiles with the offset in
+  `illustrated-warp.json` taken out, exactly at its corners and linearly
+  between (two triangles), so tiles meet without seams. Around it, where the drawing stops, OpenStreetMap is
   drawn in the drawing's colors (`ILLUSTRATED_PAINT`, sampled from its tiles:
   greens, gray roads, cream footpaths, pale gray roofs), with its labels, icons,
   3D buildings and borders off so nothing lands on the drawing. The drawing's
@@ -476,8 +508,10 @@ their description. Turn reports into tickets, then fix them one of two ways:
 - Unplaced codes: Social Sciences Building (`SSB`), Halicioglu Data Science
   Institute (`HDSI`), Triton Administrative Services Building (`TASB`), Seventh
   College West 2 (`SEVW2`), and `CCC` (unidentified).
-- Few buildings have mapped entrances (45 of 346). Adding `entrance=*` nodes in
-  OSM makes routes end at real doors. Good ticket material.
+- Few buildings have mapped entrances (61 of 592; 319 more have doors traced
+  from the walkways, which can't tell a door from a blank wall a path happens
+  to meet). Adding `entrance=*` nodes in OSM makes routes end at real doors.
+  Good ticket material.
 
 ## Transit
 

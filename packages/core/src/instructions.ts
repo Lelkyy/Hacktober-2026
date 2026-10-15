@@ -2,7 +2,9 @@ import { distanceMeters } from "./geo.ts";
 import type { CampusGraph } from "./graph.ts";
 import type { BusLeg, MoveLeg, Route } from "./route.ts";
 import { routeLabel } from "./transit.ts";
-import { BikeDir, EdgeKind, type LngLat } from "./types.ts";
+import { BikeDir, EdgeKind, type Building, type LngLat } from "./types.ts";
+import { describeEntrance } from "./indoor.ts";
+import { doorAt, routeEnds } from "./plan.ts";
 
 export type Maneuver =
   | "depart"
@@ -42,9 +44,16 @@ const MIN_STEP_M = 8;
 const MIN_PUSH_M = 25;
 
 /** Turn-by-turn instructions for a route, Google-Maps style. */
-export function buildSteps(graph: CampusGraph, route: Route, destination: string): Step[] {
+export function buildSteps(graph: CampusGraph, route: Route, destination: string, opts: { leaving?: Building } = {}): Step[] {
   const steps: Step[] = [];
   let offset = 0; // meters along route.coordinates where the current leg starts
+
+  // Starting inside a building: out by the door the route leaves from.
+  if (opts.leaving && route.coordinates.length) {
+    const door = doorAt(opts.leaving, routeEnds(route)[0]);
+    const by = door ? describeEntrance(opts.leaving, door) : `the nearest door on the ${compass(bearing(opts.leaving.center, route.coordinates[0]))} side`;
+    steps.push({ maneuver: "depart", text: `Leave ${opts.leaving.name} by ${by}`, at: door?.lngLat ?? route.coordinates[0], along: 0, distance: 0 });
+  }
 
   route.legs.forEach((leg, li) => {
     const next = route.legs[li + 1];

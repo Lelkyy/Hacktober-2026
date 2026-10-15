@@ -3,7 +3,7 @@ import type { CampusGraph } from "./graph.ts";
 import { edgeTravel, findRoute, findRouteArriveBy, type Profile, type Route } from "./route.ts";
 import type { TransitNetwork } from "./transit.ts";
 import { entranceTargets } from "./indoor.ts";
-import { EdgeKind, type Building, type LngLat, type Place } from "./types.ts";
+import { EdgeKind, type Building, type Entrance, type LngLat, type Place } from "./types.ts";
 
 export type Endpoint =
   | { kind: "building"; building: Building; room?: string }
@@ -63,6 +63,9 @@ export type ResolvedTrip =
 
 /** Graph nodes a trip can start and end at for a given way of travelling. */
 export function resolveTrip(graph: CampusGraph, from: Endpoint, to: Endpoint, profile: Profile): ResolvedTrip {
+  const fromBuilding = from.kind === "building" || from.kind === "point" ? from.building : undefined;
+  const toBuilding = to.kind === "building" || to.kind === "point" ? to.building : undefined;
+  if (fromBuilding && fromBuilding.id === toBuilding?.id) return { ok: false, error: `You're already in ${fromBuilding.name}.` };
   const connectors: [LngLat, LngLat][] = [];
   const ends: { start?: Approach; end?: Approach } = {};
   const accept = profile.travel === "bike" ? graph.onBikeNetwork : graph.onWalkNetwork;
@@ -100,7 +103,38 @@ export function planRoute(graph: CampusGraph, from: Endpoint, to: Endpoint, opts
           : `No route found with "${opts.profile.label}".`,
     };
   }
-  return { ok: true, route, connectors };
+  return { ok: true, route, connectors: [...connectors, ...doorWalks(from, to, route)] };
+}
+
+/** The door of a building at a node the route starts or ends at, if one is. */
+export function doorAt(building: Building, node: number): Entrance | undefined {
+  return node >= 0 ? (building.entrances ?? []).find((d) => d.node === node) : undefined;
+}
+
+/** The first and last graph node of a route (-1 at an end that isn't one, like a bus stop). */
+export function routeEnds(route: Route): [number, number] {
+  const [first, last] = [route.legs[0], route.legs[route.legs.length - 1]];
+  const at = (leg: Route["legs"][number] | undefined, k: "first" | "last") =>
+    !leg || leg.mode === "bus" || !leg.nodes.length ? -1 : leg.nodes[k === "first" ? 0 : leg.nodes.length - 1];
+  return [at(first, "first"), at(last, "last")];
+}
+
+/**
+ * For a trip from (or to) a spot inside a building — your location, pinned there — the walk
+ * between that spot and the door the route uses: straight lines in to the door, then on to where
+ * the route meets the paths.
+ */
+export function doorWalks(from: Endpoint, to: Endpoint, route: Route): [LngLat, LngLat][] {
+  const c = route.coordinates;
+  if (!c.length) return [];
+  const [firstNode, lastNode] = routeEnds(route);
+  const walk = (e: Endpoint, node: number, end: LngLat): LngLat[] => {
+    if (e.kind !== "point" || !e.building) return [];
+    const door = doorAt(e.building, node);
+    return door && distanceMeters(door.lngLat, end) > 0.5 ? [e.lngLat, door.lngLat, end] : [e.lngLat, end];
+  };
+  const pairs = (line: LngLat[]) => line.slice(1).map((p, k): [LngLat, LngLat] => [line[k], p]);
+  return [...pairs(walk(from, firstNode, c[0])), ...pairs(walk(to, lastNode, c[c.length - 1]).reverse())];
 }
 
 function endpointNodes(

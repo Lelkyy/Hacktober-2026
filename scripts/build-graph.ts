@@ -44,6 +44,7 @@ import {
 import { readGtfs, toSeconds, type Row } from "./gtfs.ts";
 import { fetchTerrain, Terrain } from "./terrain.ts";
 import { Cell, fetchGround, GroundGrid, OFF_PATH, traceMissing, type GroundShape } from "./ground.ts";
+import { Drawing, drawnWalk, fetchIllustrated, measureWarp } from "./illustrated.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RAW_OSM = join(ROOT, "data/raw/osm.json");
@@ -55,6 +56,8 @@ const RAW_GROUND = join(ROOT, "data/raw/ucsd-ground.json");
 const RAW_OSM_BUILDINGS = join(ROOT, "data/raw/osm-buildings.json");
 /** Elevation tiles (Terrain Tiles on AWS, mostly USGS 3DEP), for walking times up and down hills. */
 const RAW_TERRAIN_DIR = join(ROOT, "data/raw/terrain");
+/** UC San Diego's illustrated campus map (Concept3D tiles), for doors and its offset from the ground. */
+const RAW_ILLUSTRATED_DIR = join(ROOT, "data/raw/illustrated");
 /** Building footprints from UC San Diego's public Campus Map (campusmap.ucsd.edu). */
 const UCSD_BUILDINGS = "https://admin-enterprise-gis.ucsd.edu/server/rest/services/AdministrationServices/Buildings_Public/MapServer";
 const UCSD_QUERY = "/query?where=1%3D1&outFields=OBJECTID,FacilityLongName,BuildingAliases&outSR=4326&resultRecordCount=2000&f=geojson";
@@ -218,6 +221,11 @@ async function main() {
     writeFileSync(RAW_GROUND, JSON.stringify(await fetchGround(BBOX)));
   }
   const ground = groundGrid(JSON.parse(readFileSync(RAW_GROUND, "utf8")));
+  // The illustrated map, and how far it's drawn from the ground (for the app to bend it back).
+  await fetchIllustrated(RAW_ILLUSTRATED_DIR, refresh);
+  const drawing = new Drawing(RAW_ILLUSTRATED_DIR);
+  const measured = measureWarp(drawing, ground);
+  const warp = measured.warp;
   // Buildings: every outline OSM and UCSD have, on top of the ground plan's own, so no walk across a
   // lawn or lot goes through one. (Not open structures: canopies, carports, unbuilt sites.)
   const osmRoofs = (JSON.parse(readFileSync(RAW_OSM_BUILDINGS, "utf8")) as { elements: OsmElement[] }).elements;
@@ -480,10 +488,27 @@ async function main() {
   });
   const inBuilding = (b: RawBuilding, p: LngLat) => b.lines.some((ring) => ring.length > 3 && pointInRing(p, ring));
 
+  // Doors no one has mapped: where a walkway runs up to the building (see tracedDoors).
+  const doorsTraced = new Map<RawBuilding, TracedDoor[]>();
+  const tracedDoorsOf = (b: RawBuilding) => {
+    let doors = doorsTraced.get(b);
+    if (!doors) doorsTraced.set(b, (doors = entrancesOf(b).length ? [] : tracedDoors(b, ground, (p) => drawnWalk(drawing, warp, p))));
+    return doors;
+  };
+  /** The node a traced door's walkway leads to: the nearest within reach, nothing in the way. */
+  const doorNode = (d: TracedDoor, accept: (i: number) => boolean) =>
+    index.nearest(d.out, DOOR_NODE_METERS, (i) => accept(i) && ground.openBetween(d.out, coords[i], OFF_PATH, 3));
+
   /** Route targets for a building among nodes passing `accept`. */
   const targetsOf = (b: RawBuilding, accept: (i: number) => boolean) => {
     const atEntrances = [...new Set(entranceNodesOf(b).filter(accept))];
     if (atEntrances.length) return { targets: atEntrances, entranceCount: atEntrances.length };
+    const atDoors = [...new Set(tracedDoorsOf(b).map((d) => doorNode(d, accept)))].filter((i) => i !== -1);
+    if (atDoors.length) return { targets: atDoors, entranceCount: 0 };
+    return { targets: nearTargets(b, accept), entranceCount: 0 };
+  };
+  /** Nodes passing `accept` near a building's outline (or else nearest its middle). */
+  const nearTargets = (b: RawBuilding, accept: (i: number) => boolean) => {
     const near = new Set<number>();
     for (const line of b.lines) {
       for (const p of densify(line, 10)) {
@@ -495,7 +520,7 @@ async function main() {
       const i = index.nearest(b.center, 150, accept);
       if (i !== -1) near.add(i);
     }
-    return { targets: [...near], entranceCount: 0 };
+    return [...near];
   };
 
   // --- Shuttle stops (GTFS).
@@ -618,6 +643,9 @@ async function main() {
   const bikeComps = components(finalCoords.length, finalEdges.filter(rideable));
   const mainComponent = comps.id[remap[hub]];
   const mainBikeComponent = bikeComps.id[remap[hub]];
+  // Without steps: where a bike (pushed on footpaths) or a wheelchair can get.
+  const stepFreeComps = components(finalCoords.length, finalEdges.filter((e) => rideable(e) && e[2] !== EdgeKind.Steps));
+  const mainStepFree = stepFreeComps.id[remap[hub]];
   const kept = (i: number) => remap[i] !== -1;
   const walkNode = new Uint8Array(finalCoords.length);
   for (const [a, b, k] of finalEdges) if (walkable(k)) walkNode[a] = walkNode[b] = 1;
@@ -667,6 +695,11 @@ async function main() {
       unreachable.push(b.name);
       continue;
     }
+    // Doors reached only by steps: also the paths beside the building a bike or wheelchair gets to.
+    if (!finalTargets.some((t) => stepFreeComps.id[t] === mainStepFree)) {
+      const near = nearTargets(b, (i) => kept(i) && stepFreeComps.id[remap[i]] === mainStepFree).map((i) => remap[i]);
+      finalTargets.push(...near.filter((t) => !finalTargets.includes(t)));
+    }
     const rideTargets = rideExits(b, finalTargets);
     const aliases = [
       ...["short_name", "alt_name", "abbr_name", "official_name", "old_name", "ref", "loc_name", "name:en"].flatMap((k) =>
@@ -675,7 +708,7 @@ async function main() {
       // Shortest first, so codes like "CSE" lead.
       ...[...(b.extraAliases ?? [])].sort((x, y) => x.length - y.length),
     ].filter((a, i, all) => a && normalize(a) !== normalize(b.name) && all.findIndex((x) => normalize(x) === normalize(a)) === i);
-    const doors: Entrance[] = entrancesOf(b).map((e) => {
+    const mapped: Entrance[] = entrancesOf(b).map((e) => {
       const n = entrances[e];
       const node = osmIndex.get(n.id);
       const wheelchair = n.tags?.wheelchair;
@@ -688,6 +721,13 @@ async function main() {
         level: n.tags?.level,
       };
     });
+    // Else the doors traced from the walkways, those the route can use.
+    const doors: Entrance[] = mapped.length
+      ? mapped
+      : tracedDoorsOf(b).flatMap((d) => {
+          const node = doorNode(d, (i) => kept(i) && finalTargets.includes(remap[i]));
+          return node === -1 ? [] : [{ lngLat: [round(d.at[0]), round(d.at[1])], node: remap[node], kind: "yes", traced: true }];
+        });
     const rooms = indoorRooms.filter((r) => indoorOwner.get(r) === b);
     // Elevators mapped as points, or as shafts on the floor plans.
     const elevatorsAt = [...elevatorPts.filter((p) => inBuilding(b, p)), ...rooms.filter((r) => r.use === "elevator").map((r) => r.center)];
@@ -849,6 +889,7 @@ async function main() {
   writeFileSync(join(OUT_DIR, "buildings.json"), JSON.stringify(buildings));
   writeFileSync(join(OUT_DIR, "transit.json"), JSON.stringify(transit));
   writeFileSync(join(OUT_DIR, "indoor.json"), JSON.stringify(indoor));
+  writeFileSync(join(OUT_DIR, "illustrated-warp.json"), JSON.stringify(warp));
   const places = buildPlaces(transit);
   writeFileSync(join(OUT_DIR, "places.json"), JSON.stringify(places));
   if (sections) writeFileSync(join(OUT_DIR, "sections.json"), JSON.stringify(sections.data));
@@ -874,7 +915,9 @@ async function main() {
       `campus buildings ${buildings.length}: ${count("walk")} on foot, ${count("shuttle")} shuttle-only, ` +
         `${buildings.filter((b) => b.entranceCount > 0).length} with mapped entrances (${offCampusCount} off-campus skipped)`,
       `transit: ${new Set(transit.patterns.map((p) => p.route)).size} routes in use, ${transit.stops.length} stops, ${transit.patterns.reduce((sum, p) => sum + p.trips.length, 0)} trips`,
-      `doors: ${buildings.reduce((n, b) => n + (b.entrances?.length ?? 0), 0)} mapped on ${buildings.filter((b) => b.entrances).length} buildings; ` +
+      `doors: ${buildings.reduce((n, b) => n + (b.entrances?.filter((d) => !d.traced).length ?? 0), 0)} mapped on ${buildings.filter((b) => b.entrances?.some((d) => !d.traced)).length} buildings, ` +
+        `${buildings.reduce((n, b) => n + (b.entrances?.filter((d) => d.traced).length ?? 0), 0)} traced from walkways on ${buildings.filter((b) => b.entrances?.some((d) => d.traced)).length} more; ` +
+        `illustrated map ${measured.medianMeters.toFixed(1)} m off the ground (median of ${measured.windows} matched windows); ` +
         `elevators in ${buildings.filter((b) => b.elevators).length}; indoor maps in ${Object.keys(indoor).length} buildings (${Object.values(indoor).flat().filter((r) => r.ref && r.source === "osm").length} numbered rooms, ${Object.values(indoor).flat().filter((r) => r.source === "pinned").length} pinned)`,
       `places: ${places.places.filter((p) => p.kind === "lingo").length} student place names, ${places.places.filter((p) => p.kind === "stop").length} stops, ${Object.keys(places.tips).length} tips`,
       unreachable.length ? `UNREACHABLE campus buildings: ${unreachable.join(", ")}` : "every campus building is reachable",
@@ -1733,6 +1776,80 @@ function densify(line: LngLat[], stepMeters: number): LngLat[] {
   }
   if (line.length) out.push(line[line.length - 1]);
   return out;
+}
+
+/** How far out from a wall a walkway must carry on for a door to be there, in meters. */
+const DOOR_REACH = [1.5, 3, 4.5, 6];
+/** A frontage of walkway longer than this (a plaza) gets a door every this far. */
+const DOOR_RUN_METERS = 30;
+/** Traced doors closer together than this are one. */
+const DOOR_MERGE_METERS = 8;
+/** How far from a traced door's walkway the route may join the paths. */
+const DOOR_NODE_METERS = 12;
+const M_PER_DEG = 111_132;
+
+/** A door traced from the walkways: on the outline, and 3 m out along its walkway. */
+interface TracedDoor {
+  at: LngLat;
+  out: LngLat;
+}
+
+/**
+ * Doors for a building no one has mapped any on: wherever a walkway (or plaza) runs straight up to
+ * its outline — walkable all the way 6 m out — on UCSD's ground plan, or, where the plan has
+ * nothing, on the illustrated map. A sidewalk passing along a wall isn't one (it stops a few
+ * meters out, at a lawn or the street). One door in the middle of each stretch of wall a walkway
+ * meets, every 30 m along a plaza.
+ */
+function tracedDoors(b: RawBuilding, ground: GroundGrid, drawnWalkAt: (p: LngLat) => boolean): TracedDoor[] {
+  const kx = M_PER_DEG * Math.cos((b.center[1] * Math.PI) / 180);
+  const move = (p: LngLat, nx: number, ny: number, m: number): LngLat => [p[0] + (nx * m) / kx, p[1] + (ny * m) / M_PER_DEG];
+  const walkable = (q: LngLat, m: number) => {
+    const bits = ground.at(...ground.toCell(q));
+    if (bits & Cell.Street) return false;
+    if (bits & (Cell.Walk | Cell.Sidewalk)) return !(bits & Cell.Roof) || m <= 2;
+    // Right by the wall, the building's other outlines (OSM, UCSD, the plan's) disagree a little.
+    if (bits & Cell.Roof) return m <= 2;
+    if (bits & Cell.Known) return false;
+    return drawnWalkAt(q);
+  };
+  const doors: TracedDoor[] = [];
+  for (const ring of b.lines) {
+    if (ring.length < 4) continue;
+    const pts = densify(ring, 1).slice(0, -1);
+    const n = pts.length;
+    const normals: [number, number][] = [];
+    const open = pts.map((p, i) => {
+      const [a, c] = [pts[(i - 1 + n) % n], pts[(i + 1) % n]];
+      const [tx, ty] = [(c[0] - a[0]) * kx, (c[1] - a[1]) * M_PER_DEG];
+      const len = Math.hypot(tx, ty);
+      let [nx, ny] = len ? [ty / len, -tx / len] : [0, 0];
+      if (pointInRing(move(p, nx, ny, 0.5), ring)) [nx, ny] = [-nx, -ny];
+      normals.push([nx, ny]);
+      return len > 0 && DOOR_REACH.every((m) => walkable(move(p, nx, ny, m), m));
+    });
+    // Stretches of wall in a row that walkways meet (starting after a closed bit, as the ring wraps).
+    const start = open.indexOf(false);
+    const runs: number[][] = [];
+    for (let k = 0; k < n; k++) {
+      const i = (Math.max(0, start) + k) % n;
+      if (!open[i]) continue;
+      if (k && open[(i - 1 + n) % n] && runs.length) runs[runs.length - 1].push(i);
+      else runs.push([i]);
+    }
+    for (const run of runs) {
+      if (run.length < 2) continue;
+      const pieces = Math.ceil(run.length / DOOR_RUN_METERS);
+      for (let k = 0; k < pieces; k++) {
+        const i = run[Math.floor(((k + 0.5) * run.length) / pieces)];
+        const [nx, ny] = normals[i];
+        // One walkway meeting the building round a corner is one door.
+        if (doors.some((d) => haversine(d.at[0], d.at[1], pts[i][0], pts[i][1]) < DOOR_MERGE_METERS)) continue;
+        doors.push({ at: pts[i], out: move(pts[i], nx, ny, 3) });
+      }
+    }
+  }
+  return doors;
 }
 
 /** Area of a ring in square meters (flat approximation, fine at building scale). */

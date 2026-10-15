@@ -6,6 +6,7 @@ import {
   PROFILES,
   rideRuns,
   buildSteps,
+  doorWalks,
   buildingAt,
   buildingCentre,
   type IndoorData,
@@ -276,7 +277,11 @@ export function App() {
   const bestTransit = transitOpts.find((o) => !o.walkOnly) ?? null;
   const busUnavailable = transitResult && !bestTransit ? "No shuttle, bus or trolley route found for this trip." : null;
   const transitPlan: Plan | null = transitOpts[selectedOption]
-    ? { ok: true, route: transitOpts[selectedOption].route, connectors: transitResult!.connectors }
+    ? {
+        ok: true,
+        route: transitOpts[selectedOption].route,
+        connectors: [...transitResult!.connectors, ...doorWalks(from!, to!, transitOpts[selectedOption].route)],
+      }
     : transitResult?.error
       ? { ok: false, error: transitResult.error }
       : null;
@@ -464,7 +469,10 @@ export function App() {
     () => (data ? new CampusSearch({ buildings: data.buildings, places: allPlaces, courses: data.sections?.courses, indoor }) : null),
     [data, allPlaces, indoor],
   );
-  const steps = useMemo(() => (data && route && to ? buildSteps(data.graph, route, endpointLabel(to)) : []), [data, route, to]);
+  const steps = useMemo(
+    () => (data && route && to ? buildSteps(data.graph, route, endpointLabel(to), { leaving: from?.kind === "point" ? from.building : undefined }) : []),
+    [data, route, to, from],
+  );
   const destBuilding = to?.kind === "building" ? to.building : null;
   const inside = useMemo(
     () =>
@@ -599,7 +607,9 @@ export function App() {
     if (!data) return;
     if (tab === "report") return setReportPin(p);
     if (settingHome) return saveHome([p]);
-    const pin: Endpoint = { kind: "point", lngLat: p, label: "Dropped pin" };
+    // A pin inside a building is reached, or left, by its doors.
+    const inside = buildingAt(data.buildings, p, 0);
+    const pin: Endpoint = { kind: "point", lngLat: p, label: "Dropped pin", ...(inside ? { building: inside } : {}) };
     if (clickTarget === "from") {
       setFrom(pin);
       setClickTarget("to");

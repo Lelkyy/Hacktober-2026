@@ -86,6 +86,8 @@ export interface Entrance {
   label?: string;
   /** OSM level=* of the floor the door opens onto, when tagged. */
   level?: string;
+  /** Not mapped: found where a walkway runs up to the building (UCSD's ground plan, its illustrated map). */
+  traced?: boolean;
 }
 
 /** An indoor space: a room or corridor mapped in OpenStreetMap, or a room students pinned. */

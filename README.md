@@ -35,7 +35,9 @@ the way, using the paths, stairs and bike paths students actually use.
   GPS ("In 120 ft, turn left onto Library Walk"), re-routes when you go off
   course, can speak instructions, and keeps the screen on.
 - **Inside the building:** which door to use, whether there's an elevator, and
-  roughly which floor the room is on.
+  roughly which floor the room is on. Starting inside a building, the route
+  leaves by one of its doors (traced from where walkways meet it, where no
+  door is mapped).
 - **Your whole day:** see any day's classes in order, how long each walk between
   them takes and whether the gap is enough, and get directions to any class,
   from where you are, from the class before, or from home. With a home saved,
@@ -49,7 +51,8 @@ the way, using the paths, stairs and bike paths students actually use.
   across the lawn between them, but only when that saves a real part of the trip.
   Parking lots can be walked anywhere.
 - **Two campus maps:** the official campus map (district names and campus
-  boundary) or UC San Diego's illustrated one, with routes drawn on top.
+  boundary) or UC San Diego's illustrated one, moved onto true positions (it's
+  drawn ~4 m off) so routes sit on its walkways.
 - **Live trolleys and buses:** every trolley and nearby bus on the map as it
   moves, which way it's heading, and when it reaches its next stop (needs an
   MTS real-time API key).

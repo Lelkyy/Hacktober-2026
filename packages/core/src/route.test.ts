@@ -6,7 +6,8 @@ import { PROFILES, findRoute, findRouteArriveBy, hillFactor, rideFactor, rideRun
 import { dayClasses, defaultPick, groupOverlaps, nextClass, startOn, type ClassMeeting } from "./schedule.ts";
 import { formatCourseCode, searchCourses, sectionChoices, type CourseSections, type SectionsData } from "./sections.ts";
 import { TransitNetwork, type TransitData } from "./transit.ts";
-import { checkBusRoute, planRoute } from "./plan.ts";
+import { checkBusRoute, planRoute, routeEnds } from "./plan.ts";
+import { buildingCentre } from "./indoor.ts";
 import { transitOptions } from "./transitOptions.ts";
 import { buildSteps } from "./instructions.ts";
 import { BikeDir, EdgeKind, NO_ELEVATION, type Building, type GraphData, type IndoorData, type LngLat } from "./types.ts";
@@ -521,6 +522,61 @@ describe("real campus data", () => {
     const r = findRoute(graph, byName("Geisel Library").targets[0], byName("Center Hall").targets)!;
     expect(r.meters).toBeGreaterThan(150);
     expect(r.meters).toBeLessThan(700);
+  });
+
+  it("leaves a building you're in by one of its doors", () => {
+    const york = byName("York Hall");
+    expect(york.entrances?.length).toBeGreaterThan(0);
+    const inside = buildingCentre(york);
+    const from = { kind: "point" as const, lngLat: inside, label: "My location", building: york };
+    const plan = planRoute(graph, from, { kind: "building", building: byName("Geisel Library") }, { profile: PROFILES.walk });
+    if (!plan.ok) throw new Error(plan.error);
+    // You, then the door, then where the route meets the paths.
+    const door = york.entrances!.find((d) => d.node === routeEnds(plan.route)[0])!;
+    expect(door).toBeDefined();
+    expect(plan.connectors[0]).toEqual([inside, door.lngLat]);
+    expect(plan.connectors[plan.connectors.length - 1][1]).toEqual(plan.route.coordinates[0]);
+    const steps = buildSteps(graph, plan.route, "Geisel Library", { leaving: york });
+    expect(steps[0].text).toMatch(/^Leave York Hall by the entrance on the \w+ side$/);
+  });
+
+  it("doesn't route you out of a building and back in", () => {
+    const york = byName("York Hall");
+    const from = { kind: "point" as const, lngLat: buildingCentre(york), label: "My location", building: york };
+    const plan = planRoute(graph, from, { kind: "building", building: york }, { profile: PROFILES.walk });
+    expect(plan).toEqual({ ok: false, error: "You're already in York Hall." });
+  });
+
+  it("routes between the farthest-apart buildings in every mode, from inside", () => {
+    let [a, b, apart] = [buildings[0], buildings[0], 0];
+    for (const x of buildings) for (const y of buildings) if (distanceMeters(x.center, y.center) > apart) [a, b, apart] = [x, y, distanceMeters(x.center, y.center)];
+    expect(apart).toBeGreaterThan(3000);
+    const from = { kind: "point" as const, lngLat: buildingCentre(a), label: "My location", building: a };
+    for (const profile of [PROFILES.walk, PROFILES.accessible, PROFILES.bike]) {
+      const plan = planRoute(graph, from, { kind: "building", building: b }, { profile });
+      if (!plan.ok) throw new Error(`${profile.label}: ${plan.error}`);
+      expect(plan.route.meters / apart).toBeLessThan(1.8);
+      expect(plan.connectors[0][0]).toEqual(from.lngLat);
+    }
+  });
+
+  it("says a start far off campus is too far from the paths", () => {
+    const downtown = { kind: "point" as const, lngLat: [-117.1611, 32.7157] as LngLat, label: "Downtown" };
+    expect(planRoute(graph, downtown, { kind: "building", building: byName("Geisel Library") }, { profile: PROFILES.walk })).toEqual({
+      ok: false,
+      error: "Start is too far from any mapped path.",
+    });
+  });
+
+  it("traces doors from the walkways where none are mapped, each on the paths", () => {
+    const traced = buildings.filter((b) => b.entrances?.some((d) => d.traced));
+    expect(traced.length).toBeGreaterThan(200);
+    for (const b of traced) {
+      for (const d of b.entrances!) {
+        expect(b.targets).toContain(d.node);
+        expect(distanceMeters(d.lngLat, graph.coord(d.node))).toBeLessThan(16);
+      }
+    }
   });
 
   it("reaches every campus building on foot, or by shuttle where marked", () => {

@@ -4,8 +4,8 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { unzlibSync } from "fflate";
 import type { LngLat } from "@campus/core";
+import { decodePng } from "./png.ts";
 
 const TILES = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium";
 /** The most detailed level the tiles have. */
@@ -62,57 +62,10 @@ export class Terrain {
   }
 }
 
-/** A terrarium PNG (8-bit RGB or RGBA) to elevations: red * 256 + green + blue / 256 - 32768. */
+/** A terrarium PNG to elevations: red * 256 + green + blue / 256 - 32768. */
 function decodeTerrarium(png: Uint8Array): Float32Array {
-  const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
-  let width = 0;
-  let height = 0;
-  let channels = 3;
-  const idat: Uint8Array[] = [];
-  for (let at = 8; at < png.length; ) {
-    const len = view.getUint32(at);
-    const type = String.fromCharCode(...png.subarray(at + 4, at + 8));
-    const data = png.subarray(at + 8, at + 8 + len);
-    if (type === "IHDR") {
-      width = view.getUint32(at + 8);
-      height = view.getUint32(at + 12);
-      if (data[8] !== 8 || data[12] !== 0) throw new Error("Unsupported terrain PNG (not 8-bit, or interlaced)");
-      channels = data[9] === 6 ? 4 : data[9] === 2 ? 3 : 0;
-      if (!channels) throw new Error("Unsupported terrain PNG color type");
-    } else if (type === "IDAT") idat.push(data);
-    at += 12 + len;
-  }
-  const joined = new Uint8Array(idat.reduce((n, d) => n + d.length, 0));
-  idat.reduce((off, d) => (joined.set(d, off), off + d.length), 0);
-  const raw = unzlibSync(joined);
-  // Undo the per-row filters.
-  const stride = width * channels;
-  const px = new Uint8Array(height * stride);
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)];
-    const src = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
-    const row = px.subarray(y * stride, (y + 1) * stride);
-    const up = y ? px.subarray((y - 1) * stride, y * stride) : new Uint8Array(stride);
-    for (let i = 0; i < stride; i++) {
-      const a = i >= channels ? row[i - channels] : 0;
-      const b = up[i];
-      const c = i >= channels ? up[i - channels] : 0;
-      let v = src[i];
-      if (filter === 1) v += a;
-      else if (filter === 2) v += b;
-      else if (filter === 3) v += (a + b) >> 1;
-      else if (filter === 4) {
-        const p = a + b - c;
-        const [pa, pb, pc] = [Math.abs(p - a), Math.abs(p - b), Math.abs(p - c)];
-        v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-      }
-      row[i] = v & 255;
-    }
-  }
+  const { width, height, rgba } = decodePng(png);
   const out = new Float32Array(width * height);
-  for (let i = 0; i < out.length; i++) {
-    const o = i * channels;
-    out[i] = px[o] * 256 + px[o + 1] + px[o + 2] / 256 - 32768;
-  }
+  for (let i = 0; i < out.length; i++) out[i] = rgba[i * 4] * 256 + rgba[i * 4 + 1] + rgba[i * 4 + 2] / 256 - 32768;
   return out;
 }
