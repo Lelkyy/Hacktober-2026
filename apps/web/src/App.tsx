@@ -29,6 +29,13 @@ import {
   type Route,
   type SharedBike,
   type LiveVehicle,
+  planScooterTrip,
+  parkingSpots,
+  scooterProfile,
+  zoneLimits,
+  type RideZone,
+  type ScooterTrip,
+  BikeDir,
 } from "@campus/core";
 import { useCallback, useEffect, useMemo, useState, type JSX } from "react";
 import { BuildingSearch } from "./BuildingSearch.tsx";
@@ -37,7 +44,7 @@ import { Itinerary, formatDistance, formatTime } from "./Itinerary.tsx";
 import { PALETTE } from "./palette.ts";
 import { MapLayersMenu } from "./MapLayersMenu.tsx";
 import { SpinButton } from "./SpinButton.tsx";
-import { fetchSpinVehicles, SPIN_REFRESH_MS } from "./spin.ts";
+import { fetchSpinVehicles, fetchSpinZones, SPIN_REFRESH_MS } from "./spin.ts";
 import { LiveTransitButton } from "./LiveTransitButton.tsx";
 import { fetchLiveVehicles, MTS_LIVE, LIVE_REFRESH_MS } from "./mts.ts";
 import { MapView, type BaseMap, type CampusPlaces, type DayOverlay, type RouteLine } from "./MapView.tsx";
@@ -50,6 +57,7 @@ import {
   HomeIcon,
   StarIcon,
   LocateIcon,
+  ScooterIcon,
   StepFreeIcon,
   SwapIcon,
   WalkIcon,
@@ -71,7 +79,9 @@ const SUGGEST_MIN_FASTER = 3;
 const PIN_TO_BUILDING_M = 10;
 type PointEndpoint = Extract<Endpoint, { kind: "point" }>;
 const BIKE_COLOR = PALETTE.sageDeep;
-const MODE_ICONS: Record<ModeId, () => JSX.Element> = { walk: WalkIcon, accessible: StepFreeIcon, bike: BikeIcon, bus: BusIcon };
+const MODE_ICONS: Record<ModeId, () => JSX.Element> = { walk: WalkIcon, accessible: StepFreeIcon, bike: BikeIcon, scooter: ScooterIcon, bus: BusIcon };
+/** Spin's orange, for scooter rides on the map. */
+const SPIN_COLOR = "#FF5A1F";
 
 type Tab = "go" | "schedule" | "report";
 
@@ -95,6 +105,8 @@ export function App() {
   const indoor = useMemo<IndoorData>(() => data?.indoor ?? {}, [data]);
   /** Live turn-by-turn navigation, and your position while it's running. */
   const [navigating, setNavigating] = useState(false);
+  /** Navigating a scooter trip, and you've reached the scooter: re-plans ride it from where you are. */
+  const [onScooter, setOnScooter] = useState(false);
   const [userPos, setUserPos] = useState<LngLat | null>(null);
 
   const [from, setFromRaw] = useState<Endpoint | null>(null);
@@ -301,36 +313,10 @@ export function App() {
     [planFor, from, to, arriveBy?.at, departAt],
   );
 
-  /** Each mode's option for this trip: its plan, or why it isn't offered. */
-  const options: Record<ModeId, { plan: Plan | null; unavailable: string | null }> = {
-    walk: { plan: walkPlan, unavailable: null },
-    accessible: { plan: stepFreePlan, unavailable: noStairsUnavailable },
-    bike: { plan: bikePlan, unavailable: null },
-    bus: { plan: bestTransit ? { ok: true, route: bestTransit.route, connectors: [] } : null, unavailable: busUnavailable },
-  };
-
-  const plan = useMemo(() => {
-    if (!from || !to) return null;
-    // Transit with no transit route at all: show the walk instead (and say why).
-    if (mode === "bus") return busUnavailable ? walkPlan : transitPlan;
-    // Likewise "No stairs" with no step-free route: show the walk, with a note.
-    if (mode === "accessible") return noStairsUnavailable ? walkPlan : stepFreePlan;
-    if (mode === "walk") return walkPlan;
-    return bikePlan;
-  }, [from, to, mode, busUnavailable, walkPlan, transitPlan, noStairsUnavailable, stepFreePlan, bikePlan]);
-  const route = plan?.ok ? plan.route : null;
-
-  // Walking: point out transit when it's clearly faster.
-  const busSuggestion = useMemo(() => {
-    if ((mode !== "walk" && mode !== "accessible") || !bestTransit || !route) return null;
-    const saved = arriveBy
-      ? (bestTransit.route.leaveAt.getTime() - route.leaveAt.getTime()) / 60_000
-      : (route.arriveAt.getTime() - bestTransit.route.arriveAt.getTime()) / 60_000;
-    return saved >= SUGGEST_MIN_FASTER ? { route: bestTransit.route, savedMin: Math.round(saved) } : null;
-  }, [mode, bestTransit, route, arriveBy]);
-
+  // Spin's fleet: while the Spin button is on, and while a trip is planned (for the scooter option).
+  const spinWanted = spinOn || (!!from && !!to);
   useEffect(() => {
-    if (!spinOn) {
+    if (!spinWanted) {
       setSpinBikes(null);
       return;
     }
@@ -342,10 +328,10 @@ export function App() {
         .then((bikes) => {
           if (stopped) return;
           setSpinBikes(bikes);
-          if (first && !bikes.length) setHint("No Spin e-bikes or scooters are free to ride right now.");
+          if (first && !bikes.length && spinOn) setHint("No Spin e-bikes or scooters are free to ride right now.");
           first = false;
         })
-        .catch(() => !stopped && first && setHint("Couldn't load Spin vehicles. Try again in a moment."))
+        .catch(() => !stopped && first && spinOn && setHint("Couldn't load Spin vehicles. Try again in a moment."))
         .finally(() => !stopped && setSpinLoading(false));
     };
     load();
@@ -357,7 +343,83 @@ export function App() {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [spinOn]);
+  }, [spinWanted, spinOn]);
+  // Spin's zones (no riding, no parking, speed limits): loaded once, when first wanted.
+  const [spinZones, setSpinZones] = useState<RideZone[] | null>(null);
+  useEffect(() => {
+    if (!spinWanted || spinZones) return;
+    fetchSpinZones()
+      .then(setSpinZones)
+      .catch(() => setSpinZones([]));
+  }, [spinWanted, spinZones]);
+  const zoneSpeeds = useMemo(() => (data && spinZones ? zoneLimits(data.graph, spinZones) : undefined), [data, spinZones]);
+  const parking = useMemo(() => (campusPlaces ? parkingSpots(campusPlaces.points) : []), [campusPlaces]);
+  /** The scooter trip: walk to a free Spin scooter, ride, park at a hub or rack, walk on. */
+  const scooterResult = useMemo(
+    () =>
+      data && from && to && spinBikes && spinZones && !arriveBy
+        ? planScooterTrip(data.graph, from, to, { scooters: spinBikes, parking, zones: spinZones, limits: zoneSpeeds, departAt, riding: onScooter })
+        : null,
+    [data, from, to, spinBikes, spinZones, zoneSpeeds, parking, departAt, arriveBy, onScooter],
+  );
+  const scooterTrip: ScooterTrip | null = scooterResult?.ok ? scooterResult.trip : null;
+  // Once you're at the scooter (within GPS reach), you're riding it.
+  useEffect(() => {
+    if (!navigating) return setOnScooter(false);
+    const at = scooterTrip?.scooter.lngLat;
+    if (mode === "scooter" && at && userPos && !onScooter && haversine(at[0], at[1], userPos[0], userPos[1]) < 25) setOnScooter(true);
+  }, [navigating, mode, scooterTrip, userPos, onScooter]);
+  // UCSD's no-scooter walks, from the map data.
+  const noScooterWalks = useMemo(() => {
+    if (!data) return [];
+    const g = data.graph;
+    const lines: LngLat[][] = [];
+    for (let e = 0; e < g.edgeCount; e++) if (g.edgeBikeDir[e] & BikeDir.NoScooter) lines.push([g.coord(g.edgeFrom[e]), g.coord(g.edgeTo[e])]);
+    return lines;
+  }, [data]);
+  /** The rules on the map while scooters are chosen, or the Spin layer is on. */
+  const scooterRules = useMemo(
+    () => ((mode === "scooter" && from && to) || spinOn ? { zones: spinZones ?? [], noScooter: noScooterWalks, parking } : null),
+    [mode, from, to, spinOn, spinZones, noScooterWalks, parking],
+  );
+  const scooterPlan: Plan | null = scooterResult
+    ? scooterResult.ok
+      ? { ok: true, route: scooterResult.trip.route, connectors: scooterResult.trip.connectors }
+      : scooterResult
+    : null;
+  const scooterUnavailable = arriveBy ? "Scooters are planned for leaving now, not arriving by a time." : scooterResult && !scooterResult.ok ? scooterResult.error : null;
+
+  /** Each mode's option for this trip: its plan, or why it isn't offered. */
+  const options: Record<ModeId, { plan: Plan | null; unavailable: string | null }> = {
+    walk: { plan: walkPlan, unavailable: null },
+    accessible: { plan: stepFreePlan, unavailable: noStairsUnavailable },
+    bike: { plan: bikePlan, unavailable: null },
+    scooter: { plan: scooterPlan, unavailable: scooterUnavailable },
+    bus: { plan: bestTransit ? { ok: true, route: bestTransit.route, connectors: [] } : null, unavailable: busUnavailable },
+  };
+
+  const plan = useMemo(() => {
+    if (!from || !to) return null;
+    // Transit with no transit route at all: show the walk instead (and say why).
+    if (mode === "bus") return busUnavailable ? walkPlan : transitPlan;
+    // Likewise "No stairs" with no step-free route: show the walk, with a note.
+    if (mode === "accessible") return noStairsUnavailable ? walkPlan : stepFreePlan;
+    if (mode === "walk") return walkPlan;
+    // No scooter trip (none free nearby, no parking...): the walk, with the reason.
+    if (mode === "scooter") return scooterUnavailable ? walkPlan : scooterPlan;
+    return bikePlan;
+  }, [from, to, mode, busUnavailable, walkPlan, transitPlan, noStairsUnavailable, stepFreePlan, bikePlan, scooterUnavailable, scooterPlan]);
+  const route = plan?.ok ? plan.route : null;
+
+  // Walking: point out transit when it's clearly faster.
+  const busSuggestion = useMemo(() => {
+    if ((mode !== "walk" && mode !== "accessible") || !bestTransit || !route) return null;
+    const saved = arriveBy
+      ? (bestTransit.route.leaveAt.getTime() - route.leaveAt.getTime()) / 60_000
+      : (route.arriveAt.getTime() - bestTransit.route.arriveAt.getTime()) / 60_000;
+    return saved >= SUGGEST_MIN_FASTER ? { route: bestTransit.route, savedMin: Math.round(saved) } : null;
+  }, [mode, bestTransit, route, arriveBy]);
+
 
   useEffect(() => {
     if (!liveOn) {
@@ -415,7 +477,8 @@ export function App() {
         // The top transit option, as in the Transit list.
         return transitFor(start, dest, { arriveBy: arrive })?.options[0]?.route ?? null;
       }
-      const p = planFor(mode, start, dest, arrive);
+      // A scooter may not be there later: time the walk.
+      const p = planFor(mode === "scooter" ? "walk" : mode, start, dest, arrive);
       if (p?.ok) return p.route;
       // No step-free route there: still say when to leave, using the walk.
       const w = mode === "accessible" ? planFor("walk", start, dest, arrive) : null;
@@ -511,10 +574,10 @@ export function App() {
       ? route.legs.flatMap((l): RouteLine[] =>
           l.mode === "bike"
             ? // On roads the ride is drawn on the right-hand side, where you ride.
-              rideRuns(data.graph, PROFILES.bike, l).map((r) => ({
+              rideRuns(data.graph, l.vehicle === "scooter" ? scooterProfile(zoneSpeeds) : PROFILES.bike, l).map((r) => ({
                 coordinates: r.coordinates,
                 kind: "bike",
-                color: BIKE_COLOR,
+                color: l.vehicle === "scooter" ? SPIN_COLOR : BIKE_COLOR,
                 keepRight: r.keepRight,
               }))
             : [{ coordinates: l.coordinates, kind: l.mode, color: l.mode === "bus" ? l.route.color : "" }],
@@ -696,7 +759,9 @@ export function App() {
           baseMap={baseMap}
           places={campusPlaces}
           placeCategories={placeCategories}
-          spinBikes={spinBikes}
+          spinBikes={spinOn ? spinBikes : null}
+          scooterRules={scooterRules}
+          scooterTrip={mode === "scooter" && scooterTrip && !showingDay ? { scooter: scooterTrip.scooter.lngLat, parking: scooterTrip.parking } : null}
           live={shownLive}
           onPlaceDirections={(p) => {
             setTab("go");
@@ -927,6 +992,18 @@ export function App() {
               {mode === "accessible" && noStairsUnavailable && (
                 <p className="note warn-note">There's no step-free route to this destination. Showing the route with stairs.</p>
               )}
+              {mode === "scooter" && scooterUnavailable && (
+                <p className="note warn-note">{scooterUnavailable} Showing the walk.</p>
+              )}
+              {mode === "scooter" && !scooterUnavailable && !scooterResult && from && to && <p className="note">Finding a free Spin scooter…</p>}
+              {mode === "scooter" && scooterTrip && walkPlan?.ok && walkPlan.route.seconds <= scooterTrip.route.seconds && (
+                <p className="note">
+                  Walking is quicker here ({Math.max(1, Math.ceil(walkPlan.route.minutes))} min).{" "}
+                  <button className="link" onClick={() => setMode("walk")}>
+                    Walk instead
+                  </button>
+                </p>
+              )}
               {plan && !plan.ok && !busSuggestion && <p className="note warn-note">{plan.error}</p>}
               {busSuggestion && (
                 <div className="suggest">
@@ -951,6 +1028,7 @@ export function App() {
                     fare={tripFare(route, data.transit.data.fares, { upass })}
                     upass={upass}
                     onUpass={setUpass}
+                    scooter={mode === "scooter" ? scooterTrip : null}
                   />
                   <button
                     className="primary start"

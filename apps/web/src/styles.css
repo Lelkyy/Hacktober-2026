@@ -398,7 +398,7 @@ button.link.danger { color: var(--danger); }
   .result { padding: 10px; }
 }
 
-.modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.modes { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
 .modes button {
   display: flex;
   flex-direction: column;
@@ -444,6 +444,7 @@ button.link.danger { color: var(--danger); }
 }
 .leg-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--surface-2); color: var(--muted); }
 .leg.bike .leg-icon { color: var(--ok); }
+.leg.bike.scooter .leg-icon { color: #ff5a1f; }
 .leg.bus .leg-icon { color: var(--surface); background: var(--route); }
 .leg + .leg::before {
   content: "";

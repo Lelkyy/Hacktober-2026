@@ -1,5 +1,5 @@
-import { formatFare, type Leg, type Route, type TripFare } from "@campus/core";
-import { BikeIcon, BusIcon, TrolleyIcon, WalkIcon } from "./Icons.tsx";
+import { formatFare, type Leg, type Route, type ScooterTrip, type TripFare } from "@campus/core";
+import { BikeIcon, BusIcon, ScooterIcon, TrolleyIcon, WalkIcon } from "./Icons.tsx";
 
 /** Door-to-door summary: total time, leave/arrive, and each walking, riding or shuttle leg. */
 export function Itinerary({
@@ -9,6 +9,7 @@ export function Itinerary({
   fare,
   upass,
   onUpass,
+  scooter,
 }: {
   route: Route;
   destination: string;
@@ -17,9 +18,13 @@ export function Itinerary({
   fare?: TripFare | null;
   upass?: boolean;
   onUpass?: (v: boolean) => void;
+  /** A shared scooter trip: the scooter it rides. */
+  scooter?: ScooterTrip | null;
 }) {
   const showTimes = route.usesTransit || showLeave;
   const byBike = route.legs.some((l) => l.mode === "bike");
+  const byScooter = route.legs.some((l) => l.mode === "bike" && l.vehicle === "scooter");
+  const ridden = byScooter ? "scooter" : "bike";
   const push = route.legs.reduce((s, l) => s + (l.mode === "bike" ? l.pushMeters : 0), 0);
   return (
     <section className="itinerary" aria-label="Route">
@@ -31,12 +36,22 @@ export function Itinerary({
         <span className="itin-meta">
           {showTimes ? `${formatTime(route.leaveAt)} → ${formatTime(route.arriveAt)}` : `Arrive ${formatTime(route.arriveAt)}`}
           <span className="muted">
-            {formatDistance(route.meters)} {byBike ? "by bike" : "on foot"}
+            {formatDistance(route.meters)} {byScooter ? "by Spin scooter and on foot" : byBike ? "by bike" : "on foot"}
             {route.stairSegments > 0 && ` · ${route.stairSegments} stair${route.stairSegments > 1 ? "s" : ""}`}
           </span>
         </span>
       </div>
-      {byBike && push > 20 && <p className="muted small">Includes {formatDistance(push)} walking your bike on footpaths.</p>}
+      {byBike && push > 20 && (
+        <p className="muted small">
+          Includes {formatDistance(push)} walking your {ridden} {byScooter ? "where scooters can't ride" : "on footpaths"}.
+        </p>
+      )}
+      {byScooter && (
+        <p className="muted small">
+          Unlock and pay in the Spin app. Scooters ride on roads and bike paths, never sidewalks; at most 8 mph on shared paths, and
+          walked on Library Walk, Warren Mall and Price Center Plaza. Park only at a Spin hub or bike rack.
+        </p>
+      )}
       {fare && (
         <div className="fare">
           <span>
@@ -56,7 +71,7 @@ export function Itinerary({
       {route.legs.length > 1 && (
         <ol className="legs">
           {route.legs.map((leg, i) => (
-            <LegRow key={i} leg={leg} next={route.legs[i + 1]} destination={destination} />
+            <LegRow key={i} leg={leg} next={route.legs[i + 1]} destination={destination} scooter={scooter} />
           ))}
         </ol>
       )}
@@ -64,15 +79,19 @@ export function Itinerary({
   );
 }
 
-function LegRow({ leg, next, destination }: { leg: Leg; next?: Leg; destination: string }) {
+function LegRow({ leg, next, destination, scooter }: { leg: Leg; next?: Leg; destination: string; scooter?: ScooterTrip | null }) {
   if (leg.mode !== "bus") {
-    const to = next?.mode === "bus" ? next.from.name : destination;
+    const shared = leg.mode === "bike" && leg.parkAt !== undefined;
+    const toScooter = next?.mode === "bike" && next.parkAt !== undefined;
+    const battery = scooter?.scooter.battery !== undefined ? ` (${Math.round(scooter.scooter.battery * 100)}% charged)` : "";
+    const to = next?.mode === "bus" ? next.from.name : toScooter ? `a Spin scooter${battery}` : shared ? leg.parkAt : destination;
     return (
-      <li className={`leg ${leg.mode}`}>
-        <span className="leg-icon">{leg.mode === "bike" ? <BikeIcon /> : <WalkIcon />}</span>
+      <li className={`leg ${leg.mode}${shared ? " scooter" : ""}`}>
+        <span className="leg-icon">{shared ? <ScooterIcon /> : leg.mode === "bike" ? <BikeIcon /> : <WalkIcon />}</span>
         <span>
           {leg.mode === "bike" ? "Ride" : "Walk"} {Math.max(1, Math.ceil(leg.seconds / 60))} min
           <span className="muted"> to {to}</span>
+          {shared && <span className="leg-detail">Park there and end the ride in the app</span>}
         </span>
       </li>
     );

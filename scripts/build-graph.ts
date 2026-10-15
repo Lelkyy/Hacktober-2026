@@ -638,6 +638,8 @@ async function main() {
   const finalCoords: LngLat[] = [];
   for (let i = 0; i < coords.length; i++) if (remap[i] === 0) remap[i] = finalCoords.push(coords[i]) - 1;
   const finalEdges = edges.map(([a, b, k, bike, nm, dir]): Edge => [remap[a], remap[b], k, bike, nm, dir]);
+  // Where UCSD doesn't allow scooters, even on stretches mapped as bike paths.
+  for (const e of finalEdges) if (noScooters(names[e[4]], finalCoords[e[0]], finalCoords[e[1]])) e[5] |= BikeDir.NoScooter;
   // Walking connectivity ignores bike-only edges; riding connectivity uses everything.
   const comps = components(finalCoords.length, finalEdges.filter((e) => walkable(e[2])));
   const bikeComps = components(finalCoords.length, finalEdges.filter(rideable));
@@ -1776,6 +1778,22 @@ function densify(line: LngLat[], stepMeters: number): LngLat[] {
   }
   if (line.length) out.push(line[line.length - 1]);
   return out;
+}
+
+/**
+ * Where UCSD doesn't allow scooters (UCSD Police, "Bicycle, Skateboard and Scooter Guidelines":
+ * scooters are barred wherever skateboards are). The named walks; the rest of the list (building
+ * decks, Warren housing, the RIMAC concourse...) are footpaths, where scooters are walked anyway.
+ */
+const NO_SCOOTER_WALKS = new Set(["Library Walk", "Warren Mall", "Price Center Plaza", "Geisel Library Forum"]);
+/** Ridge Walk from the south edge of the Social Sciences buildings to the north edge of the Institute of the Americas. */
+const RIDGE_WALK_NO_SCOOTERS = [32.8803, 32.8855];
+
+function noScooters(name: string | undefined, a: LngLat, b: LngLat): boolean {
+  if (!name) return false;
+  if (NO_SCOOTER_WALKS.has(name)) return true;
+  const lat = (a[1] + b[1]) / 2;
+  return name === "Ridge Walk" && lat >= RIDGE_WALK_NO_SCOOTERS[0] && lat <= RIDGE_WALK_NO_SCOOTERS[1];
 }
 
 /** How far out from a wall a walkway must carry on for a door to be there, in meters. */

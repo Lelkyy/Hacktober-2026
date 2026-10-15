@@ -60,7 +60,14 @@ export function buildSteps(graph: CampusGraph, route: Route, destination: string
     if (leg.mode === "bus") {
       busSteps(leg, offset).forEach((s) => steps.push(s));
     } else {
-      moveSteps(graph, leg, offset, li === 0, next?.mode === "bus" ? next.from.name : null).forEach((s) => steps.push(s));
+      const shared = leg.mode === "bike" && leg.vehicle === "scooter" && leg.parkAt !== undefined;
+      if (shared && leg.pickUp && leg.coordinates.length) steps.push({ maneuver: "board", text: "Unlock the Spin scooter", at: leg.coordinates[0], along: offset, distance: 0 });
+      const toward = next?.mode === "bus" ? next.from.name : next?.mode === "bike" && next.parkAt !== undefined ? "the Spin scooter" : null;
+      moveSteps(graph, leg, offset, li === 0, toward).forEach((s) => steps.push(s));
+      if (shared) {
+        const end = leg.coordinates[leg.coordinates.length - 1];
+        steps.push({ maneuver: "alight", text: `Park at ${leg.parkAt} and end the ride`, at: end, along: offset + polylineLength(leg.coordinates), distance: 0 });
+      }
     }
     offset += polylineLength(leg.coordinates);
     // route.coordinates runs legs together, including the hop between them.
@@ -91,6 +98,8 @@ function moveSteps(graph: CampusGraph, leg: MoveLeg, offset: number, first: bool
   const name = (i: number) => (leg.edges[i] >= 0 ? graph.edgeName(leg.edges[i]) : undefined); // edge i: c[i] -> c[i+1]
   const kind = (i: number) => (leg.edges[i] >= 0 ? graph.kind(leg.edges[i]) : EdgeKind.Path);
   const bike = leg.mode === "bike";
+  const scooter = leg.vehicle === "scooter";
+  const ridden = scooter ? "scooter" : "bike";
   // The wrong way down a one-way: no riding (cyclists keep right), so walk it.
   const against = (i: number) => {
     const e = leg.edges[i];
@@ -98,8 +107,11 @@ function moveSteps(graph: CampusGraph, leg: MoveLeg, offset: number, first: bool
     const forward = graph.edgeFrom[e] === leg.nodes[i];
     return (graph.edgeBikeDir[e] & (forward ? BikeDir.NoForward : BikeDir.NoBackward)) !== 0;
   };
+  const noScooters = (i: number) => scooter && leg.edges[i] >= 0 && (graph.edgeBikeDir[leg.edges[i]] & BikeDir.NoScooter) !== 0;
   const rawPush = (i: number) =>
-    bike && (kind(i) === EdgeKind.Path || kind(i) === EdgeKind.Custom || kind(i) === EdgeKind.Steps || kind(i) === EdgeKind.Lot || against(i));
+    scooter && leg.pushed
+      ? (leg.pushed[i] ?? false)
+      : bike && (kind(i) === EdgeKind.Path || kind(i) === EdgeKind.Custom || kind(i) === EdgeKind.Steps || kind(i) === EdgeKind.Lot || against(i));
   // Only stretches of footpath long enough to matter get "walk your bike" instructions.
   const pushRun: boolean[] = [];
   for (let i = 0; i < c.length - 1; ) {
@@ -113,7 +125,7 @@ function moveSteps(graph: CampusGraph, leg: MoveLeg, offset: number, first: bool
 
   const out: Step[] = [];
   const headBearing = bearingAround(c, cum, 0, 1);
-  const verb = bike ? (pushing(0) ? "Walk your bike" : "Ride") : "Head";
+  const verb = bike ? (pushing(0) ? `Walk your ${ridden}` : "Ride") : "Head";
   const on = name(0) ? ` on ${name(0)}` : "";
   out.push({
     maneuver: "depart",
@@ -130,20 +142,31 @@ function moveSteps(graph: CampusGraph, leg: MoveLeg, offset: number, first: bool
 
     // Stairs and getting off / back on the bike are always worth saying.
     if (nextKind === EdgeKind.Steps && prevKind !== EdgeKind.Steps) {
-      push(out, { maneuver: "stairs", text: bike ? "Carry your bike up/down the stairs" : "Take the stairs", at: c[i], along });
+      push(out, { maneuver: "stairs", text: bike ? `Carry your ${ridden} up/down the stairs` : "Take the stairs", at: c[i], along });
       continue;
     }
     if (bike && pushing(i) && !pushing(i - 1) && nextKind !== EdgeKind.Steps) {
+      const along_ = name(i) ? ` along ${name(i)}` : "";
+      const footpath = kind(i) === EdgeKind.Path || kind(i) === EdgeKind.Custom || kind(i) === EdgeKind.Lot;
       const where = against(i)
-        ? `${kind(i) === EdgeKind.Sidewalk ? " on the sidewalk" : ""}${name(i) ? ` along ${name(i)}` : ""} (one-way the other way)`
-        : name(i)
-          ? ` along ${name(i)}`
-          : " on the footpath";
-      push(out, { maneuver: "walk-bike", text: `Get off and walk your bike${where}`, at: c[i], along });
+        ? `${kind(i) === EdgeKind.Sidewalk ? " on the sidewalk" : ""}${along_} (one-way the other way)`
+        : noScooters(i)
+          ? `${along_} (no scooters here)`
+          : scooter && !footpath
+            ? `${along_} (Spin no-ride zone)`
+            : name(i)
+              ? along_
+              : " on the footpath";
+      push(out, { maneuver: "walk-bike", text: `Get off and walk your ${ridden}${where}`, at: c[i], along });
       continue;
     }
     if (bike && !pushing(i) && pushing(i - 1)) {
-      push(out, { maneuver: "ride-bike", text: `Get back on your bike${name(i) ? ` on ${name(i)}` : ""}`, at: c[i], along });
+      push(out, { maneuver: "ride-bike", text: `Get back on your ${ridden}${name(i) ? ` on ${name(i)}` : ""}`, at: c[i], along });
+      continue;
+    }
+    // Into a zone with a lower speed limit (the scooter slows itself there).
+    if (bike && !pushing(i) && leg.limited?.[i] && !leg.limited[i - 1]) {
+      push(out, { maneuver: "straight", text: `Slow zone${name(i) ? ` on ${name(i)}` : ""}: the ${ridden} slows down here`, at: c[i], along });
       continue;
     }
 
@@ -211,7 +234,10 @@ function push(out: Step[], step: Omit<Step, "distance">) {
     // Two instructions a few meters apart: keep the earlier one unless the later
     // one is the real turn (not just "continue"/"stay on").
     const minor = step.maneuver === "straight" || step.text.includes("to stay on");
-    if (!minor) out[out.length - 1] = { ...step, distance: 0 };
+    // Getting off or back on right before a turn: say both.
+    const mount = prev.maneuver === "walk-bike" || prev.maneuver === "ride-bike";
+    if (!minor && mount) out[out.length - 1] = { ...step, text: `${prev.text}, then ${step.text[0].toLowerCase()}${step.text.slice(1)}`, along: prev.along, at: prev.at, distance: 0 };
+    else if (!minor) out[out.length - 1] = { ...step, distance: 0 };
     return;
   }
   out.push({ ...step, distance: 0 });

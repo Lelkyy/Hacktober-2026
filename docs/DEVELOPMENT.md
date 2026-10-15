@@ -447,6 +447,44 @@ one shows its battery, range and distance, with Directions.
   orange, not Spin's logo, and its tooltip says the app isn't affiliated with
   Spin.
 
+**Scooter trips** (the Scooter mode; `packages/core/src/scooter.ts`): walk to a
+free Spin scooter, ride it, park it, walk the rest. While a trip is planned the
+app loads Spin's fleet (every 60 s) and its geofencing zones (once).
+`planScooterTrip` searches walking times out from the start and back from the
+destination (15 minutes each way), tries the 5 scooters nearest on foot (15%
+charge and 1.5x the trip's straight-line distance of range, when the feed
+says), rides each to every parking spot it can end at, and keeps the quickest
+total (30 s to unlock, 45 s to park). Then the three parts are routed
+properly. A scooter is planned for leaving now, not for arriving by a time;
+class times are estimated on foot. When walking is quicker the app says so.
+- **Where scooters ride** (`PROFILES.scooter`): roads and bike paths at 6 m/s
+  (Spin caps them at 15 mph), shared paths at 3.5 m/s (UCSD: 8 mph at most),
+  walked on footpaths and sidewalks (California and UCSD: e-scooters stay off
+  them), and walked where UCSD bars scooters even on stretches mapped as bike
+  paths: Library Walk, Warren Mall, Price Center Plaza and Ridge Walk between
+  the Social Sciences buildings and the Institute of the Americas
+  (`BikeDir.NoScooter`, set in the build from UCSD Police's "Bicycle,
+  Skateboard and Scooter Guidelines"). The motor holds its speed up to a 6%
+  climb and slows above (`motorFactor`). One-ways and bike lanes as for bikes.
+- **Spin's zones** (`geofencingZones`, GBFS `geofencing_zones`; where zones
+  overlap, the first listed rules): no riding (`ride_through_allowed` false: the
+  motor stops, so walk it), no parking (`ride_allowed` false), and a speed
+  limit if a zone sets `maximum_speed_kph` (Spin's San Diego feed sets none
+  today; any it adds are followed, with a "Slow zone" instruction). Outside
+  every zone is outside the service area: no parking. `zoneLimits` gives each
+  edge its limit (`Profile.rideLimit`).
+- **Parking** (`parkingSpots`): Spin asks riders to end rides at one of ~700
+  designated spots at UCSD, which only its app shows. The public stand-ins are
+  UCSD's 25 Spin hubs and 221 bike racks from the campus places, where the
+  zones allow parking; a hub is worth 30 s more walking than a rack.
+- **Directions:** "Unlock the Spin scooter", "Get off and walk your scooter
+  along Library Walk (no scooters here)" or "(Spin no-ride zone)", "Get back on
+  your scooter", "Park at the Spin hub by Center Hall and end the ride". The
+  map shows the scooter, "Park here", Spin's no-ride zones (red), slow zones
+  (amber), UCSD's no-scooter walks (red dashes) and the hubs and racks.
+- **Mid-trip:** once you reach the scooter, a re-route plans the ride from
+  where you are, not a walk to another scooter.
+
 
 ## Search
 

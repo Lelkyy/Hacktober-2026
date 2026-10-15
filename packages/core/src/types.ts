@@ -42,6 +42,8 @@ export const BikeDir = {
   LaneForward: 4,
   /** A bike lane for riding second -> first. */
   LaneBackward: 8,
+  /** No scooters (UCSD: Library Walk, Warren Mall, Price Center Plaza, the middle of Ridge Walk): walk them. */
+  NoScooter: 16,
 } as const;
 
 /** Serialized graph written by scripts/build-graph.ts. */

@@ -26,6 +26,13 @@ export interface Profile {
   inBikeLane?: number;
   /** Speeds are for level ground and change with the slope (walking: `hillFactor`; riding: `rideFactor`). */
   hills?: boolean;
+  /** Riding only: what's ridden. A scooter has a motor (holds its speed up gentle hills) and is walked where scooters aren't allowed. */
+  vehicle?: "bike" | "scooter";
+  /**
+   * Riding only: a speed limit on an edge in m/s from zones outside the map data (a scooter
+   * operator's slow zones), 0 where riding isn't allowed (walk it), Infinity for none.
+   */
+  rideLimit?: (edge: number) => number;
 }
 
 const WALK = WALKING_SPEED_MPS;
@@ -35,6 +42,10 @@ const RIDE = 5;
 const RIDE_SHARED = 3.5;
 /** Walking a bike where riding isn't allowed. */
 const PUSH = 1.2;
+/** An e-scooter on roads and bike paths: Spin's are capped at 15 mph (6.7 m/s); a little under, with stops. */
+const SCOOTER = 6;
+/** UCSD: 8 mph (3.6 m/s) at most on shared-use paths. */
+const SHARED_PATH_LIMIT = 3.5;
 
 /** Slopes steeper than this (a 35% grade) are taken as this steep: steeper is elevation noise. */
 const MAX_GRADE = 0.35;
@@ -67,7 +78,7 @@ export function edgeTravel(
   profile: Profile,
   e: number,
   from: number,
-): { speed: number; prefer: number; push: boolean } {
+): { speed: number; prefer: number; push: boolean; limited?: boolean } {
   const kind = graph.kind(e);
   let prefer = profile.prefer?.[kind] ?? 1;
   // Stairs have their own speed; everything else changes with the slope.
@@ -79,13 +90,27 @@ export function edgeTravel(
   if (dir & (forward ? BikeDir.NoForward : BikeDir.NoBackward)) [speed, prefer] = [profile.againstOneway?.[kind] ?? 0, 1];
   else if (dir & (forward ? BikeDir.LaneForward : BikeDir.LaneBackward)) prefer = profile.inBikeLane ?? prefer;
   if (!speed) return { speed: 0, prefer, push: false };
+  // Where scooters aren't allowed, or a zone stops the motor: walk it.
+  const scooter = profile.vehicle === "scooter";
+  const limit = profile.rideLimit?.(e) ?? Infinity;
+  if (speed >= PUSH_THRESHOLD && ((scooter && dir & BikeDir.NoScooter) || limit < PUSH_THRESHOLD)) speed = PUSH;
   // Walking the bike (footpaths, the wrong way down a one-way, stairs): at walking pace for the slope.
   if (speed < PUSH_THRESHOLD) return { speed: speed * hillFactor(grade), prefer, push: true };
   // Riding, unless the climb is too steep to ride (too slow to keep your balance; ~12% and up)
   // or walking the bike would be quicker.
-  const ride = speed * rideFactor(grade);
+  const ride = Math.min(speed * (scooter ? motorFactor(grade) : rideFactor(grade)), limit);
   const walk = PUSH * hillFactor(grade);
-  return ride >= Math.max(walk, MIN_RIDE) ? { speed: ride, prefer, push: false } : { speed: walk, prefer, push: true };
+  return ride >= Math.max(walk, MIN_RIDE)
+    ? { speed: ride, prefer, push: false, ...(limit < Infinity && limit <= speed ? { limited: true } : {}) }
+    : { speed: walk, prefer, push: true };
+}
+
+/**
+ * An e-scooter's speed on a slope relative to level ground: the motor holds it up to a 6% climb,
+ * then it slows (~0.8x up 10%, ~0.6x up 15%, ~0.35x up 20%); downhill it's held at its limit.
+ */
+export function motorFactor(grade: number): number {
+  return grade <= 0.06 ? 1 : Math.max(0.35, 1 - (grade - 0.06) * 4.5);
 }
 
 // A casual rider on a slope: rider and bike 85 kg, rolling resistance 0.008, drag area 0.5 m²,
@@ -231,6 +256,37 @@ export const PROFILES = {
       [EdgeKind.Steps]: 0.4,
     },
   },
+  scooter: {
+    id: "scooter",
+    label: "Spin scooter",
+    travel: "bike",
+    vehicle: "scooter",
+    hills: true,
+    // California and UCSD: e-scooters ride on roads and bike paths, never on sidewalks or footpaths.
+    speed: {
+      [EdgeKind.Bike]: SCOOTER,
+      [EdgeKind.Road]: SCOOTER,
+      [EdgeKind.Sidewalk]: SCOOTER,
+      [EdgeKind.BikeOnly]: SCOOTER,
+      [EdgeKind.Shared]: SHARED_PATH_LIMIT,
+      [EdgeKind.Path]: PUSH,
+      [EdgeKind.Custom]: PUSH,
+      // A 20 kg scooter up or down stairs: a last resort.
+      [EdgeKind.Steps]: 0.3,
+      [EdgeKind.Gap]: 0,
+      [EdgeKind.Lot]: PUSH,
+    },
+    prefer: { [EdgeKind.Road]: 1.1, [EdgeKind.Sidewalk]: 1.1, [EdgeKind.BikeOnly]: 1.15, [EdgeKind.Shared]: 1.05, [EdgeKind.Steps]: 3 },
+    inBikeLane: 1,
+    againstOneway: {
+      [EdgeKind.Sidewalk]: PUSH,
+      [EdgeKind.Bike]: PUSH,
+      [EdgeKind.Shared]: PUSH,
+      [EdgeKind.Path]: PUSH,
+      [EdgeKind.Custom]: PUSH,
+      [EdgeKind.Steps]: 0.3,
+    },
+  },
 } satisfies Record<string, Profile>;
 
 export type ProfileId = keyof typeof PROFILES;
@@ -240,6 +296,8 @@ export const MODES = {
   walk: { label: "Walk", profile: PROFILES.walk, transit: false, walkWeight: 1 },
   accessible: { label: "No stairs", profile: PROFILES.accessible, transit: false, walkWeight: 1 },
   bike: { label: "Bike", profile: PROFILES.bike, transit: false, walkWeight: 1 },
+  // A shared Spin scooter: walk to one, ride, park at a hub or rack (planned with the live fleet: planScooterTrip).
+  scooter: { label: "Scooter", profile: PROFILES.scooter, transit: false, walkWeight: 1 },
   // Transit (shuttles, MTS buses, the trolley): the fastest trip, used only when it beats walking.
   bus: { label: "Transit", profile: PROFILES.walk, transit: true, walkWeight: 1 },
 } as const;
@@ -275,12 +333,21 @@ export interface RouteOptions {
 /** A stretch on foot or by bike. */
 export interface MoveLeg {
   mode: "walk" | "bike";
+  /** Riding legs on a scooter (else a bike). */
+  vehicle?: "scooter";
+  /** A shared scooter's ride: where it's parked at the end (a hub or bike rack). */
+  parkAt?: string;
+  /** A shared scooter's ride that starts by unlocking one. */
+  pickUp?: boolean;
   coordinates: LngLat[];
   meters: number;
   seconds: number;
   stairSegments: number;
   /** Bike legs: meters where the bike has to be walked (footpaths, stairs). */
   pushMeters: number;
+  /** Riding legs: whether each edge is walked, and whether a zone's speed limit holds you back on it. */
+  pushed?: boolean[];
+  limited?: boolean[];
   /** Graph node at each coordinate (-1 at a shuttle stop). */
   nodes: number[];
   /** Graph edge between consecutive coordinates (-1 for the walk to/from a stop). */
@@ -493,6 +560,7 @@ function buildRoute(
   const n = graph.nodeCount;
   const newMove = (fromNode: number): MoveLeg => ({
     mode: profile.travel,
+    ...(profile.vehicle === "scooter" ? { vehicle: "scooter" as const } : {}),
     coordinates: [pos(fromNode)],
     meters: 0,
     seconds: 0,
@@ -527,11 +595,15 @@ function buildRoute(
       if (step.kind === "edge") {
         const kind = graph.kind(step.edge);
         const meters = graph.edgeLength[step.edge];
-        const { speed, push } = edgeTravel(graph, profile, step.edge, last);
+        const { speed, push, limited } = edgeTravel(graph, profile, step.edge, last);
         move.meters += meters;
         move.seconds += meters / speed;
         move.stairSegments += kind === EdgeKind.Steps ? 1 : 0;
-        if (profile.travel === "bike" && push) move.pushMeters += meters;
+        if (profile.travel === "bike") {
+          if (push) move.pushMeters += meters;
+          (move.pushed ??= []).push(push);
+          (move.limited ??= []).push(!!limited);
+        }
         move.edges.push(step.edge);
       } else {
         move.edges.push(-1);

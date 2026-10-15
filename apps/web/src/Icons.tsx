@@ -48,6 +48,15 @@ export const BikeIcon = () => (
   </Icon>
 );
 
+export const ScooterIcon = () => (
+  <Icon>
+    <circle cx="6" cy="18" r="2.5" />
+    <circle cx="18.5" cy="18" r="2.5" />
+    <path d="M8.5 18h7.5l-2-12.5" />
+    <path d="M11.5 5.5h4.5" />
+  </Icon>
+);
+
 export const BusIcon = () => (
   <Icon>
     <rect x="4.5" y="3" width="15" height="15" rx="2.5" />

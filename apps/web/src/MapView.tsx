@@ -8,6 +8,8 @@ import {
   type LiveVehicle,
   type LngLat,
   type MeasuredPath,
+  type ParkingSpot,
+  type RideZone,
   type SharedBike,
   type TransitStop,
   type TripAhead,
@@ -178,6 +180,13 @@ export interface MapViewProps {
   live: { vehicles: LiveVehicle[]; at: number } | null;
   /** Spin e-bikes and scooters free to ride (all drawn), or null when the Spin button is off. */
   spinBikes: SharedBike[] | null;
+  /**
+   * Scooter rules, drawn while riding a scooter is on the cards: Spin's zones with no riding or a
+   * speed limit, UCSD's walks where scooters are walked, and where they can be parked.
+   */
+  scooterRules?: { zones: RideZone[]; noScooter: LngLat[][]; parking: ParkingSpot[] } | null;
+  /** A scooter trip's scooter and where it's parked. */
+  scooterTrip?: { scooter: LngLat; parking: ParkingSpot } | null;
   /** UCSD's places, and the categories to show. */
   places: CampusPlaces | null;
   placeCategories: string[];
@@ -310,7 +319,7 @@ export function MapView(props: MapViewProps) {
       });
       for (const layer of UCSD_LAYERS) map.addLayer({ ...layer, layout: { ...layer.layout, visibility: "none" } } as LayerSpecification);
 
-      for (const id of ["route", "connectors", "stops", "doors", "day", "places", "spin", "vehicle-ahead"]) {
+      for (const id of ["route", "connectors", "stops", "doors", "day", "places", "spin", "vehicle-ahead", "scooter-rules", "scooter-trip"]) {
         map.addSource(id, { type: "geojson", data: EMPTY });
       }
       // UCSD's places, under everything of the app's; names once zoomed in.
@@ -427,6 +436,32 @@ export function MapView(props: MapViewProps) {
         },
         paint: { "text-color": SPIN_ORANGE, "text-halo-color": PALETTE.white, "text-halo-width": 1.5 },
       });
+      // A scooter trip: the scooter to pick up (solid) and where to park it (ringed, "P").
+      map.addLayer({
+        id: "scooter-trip",
+        type: "circle",
+        source: "scooter-trip",
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 14, 6, 18, 11],
+          "circle-color": ["case", ["==", ["get", "role"], "scooter"], SPIN_ORANGE, PALETTE.white],
+          "circle-stroke-color": ["case", ["==", ["get", "role"], "scooter"], PALETTE.white, SPIN_ORANGE],
+          "circle-stroke-width": 3,
+        },
+      });
+      map.addLayer({
+        id: "scooter-trip-labels",
+        type: "symbol",
+        source: "scooter-trip",
+        layout: {
+          "text-field": ["get", "label"],
+          "text-font": ["Noto Sans Bold"],
+          "text-size": 12,
+          "text-offset": [0, 1.3],
+          "text-anchor": "top",
+          "text-optional": true,
+        },
+        paint: { "text-color": SPIN_ORANGE, "text-halo-color": PALETTE.white, "text-halo-width": 1.6 },
+      });
       map.addLayer({
         id: "stops",
         type: "circle",
@@ -451,6 +486,43 @@ export function MapView(props: MapViewProps) {
         paint: { "text-color": PALETTE.oliveDeep, "text-halo-color": PALETTE.white, "text-halo-width": 1.5 },
       });
       // Walking legs are dotted; rides are solid (bike green, shuttle in the route's color).
+      // Scooter rules under the route: no-ride zones in red, slow zones in amber, no-scooter walks
+      // dashed red, parking as small orange rings once zoomed in.
+      map.addLayer({
+        id: "scooter-zones",
+        type: "fill",
+        source: "scooter-rules",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: { "fill-color": ["case", ["get", "noRide"], "#D64545", "#E0A526"], "fill-opacity": 0.18 },
+      });
+      map.addLayer({
+        id: "scooter-zone-edges",
+        type: "line",
+        source: "scooter-rules",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: { "line-color": ["case", ["get", "noRide"], "#D64545", "#E0A526"], "line-width": 1.5, "line-dasharray": [2, 1.5] },
+      });
+      map.addLayer({
+        id: "no-scooter-walks",
+        type: "line",
+        source: "scooter-rules",
+        filter: ["==", ["geometry-type"], "LineString"],
+        layout: { "line-cap": "round" },
+        paint: { "line-color": "#D64545", "line-width": ["interpolate", ["linear"], ["zoom"], 15, 2, 19, 5], "line-dasharray": [1, 1.5], "line-opacity": 0.8 },
+      });
+      map.addLayer({
+        id: "scooter-parking",
+        type: "circle",
+        source: "scooter-rules",
+        filter: ["==", ["geometry-type"], "Point"],
+        minzoom: 15.5,
+        paint: {
+          "circle-radius": ["case", ["get", "hub"], 5, 3.5],
+          "circle-color": PALETTE.white,
+          "circle-stroke-color": SPIN_ORANGE,
+          "circle-stroke-width": ["case", ["get", "hub"], 2.5, 1.5],
+        },
+      });
       map.addLayer({
         id: "route-casing",
         type: "line",
@@ -897,6 +969,44 @@ export function MapView(props: MapViewProps) {
       map.off("rotate", turnArrows);
     };
   }, [ready]);
+
+  // Scooter rules: Spin's no-ride and slow zones (not the parking-only areas, which cover the city),
+  // UCSD's no-scooter walks, and the hubs and racks to park at.
+  useEffect(() => {
+    if (!ready) return;
+    const r = props.scooterRules;
+    source(mapRef.current!, "scooter-rules").setData({
+      type: "FeatureCollection",
+      features: r
+        ? [
+            ...r.zones
+              .filter((z) => !z.through || z.maxKph)
+              .flatMap((z) =>
+                z.polygons.map((rings) => ({
+                  type: "Feature" as const,
+                  properties: { noRide: !z.through },
+                  geometry: { type: "Polygon" as const, coordinates: rings },
+                })),
+              ),
+            ...r.noScooter.map((line) => ({ type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: line } })),
+            ...r.parking.map((p) => ({ type: "Feature" as const, properties: { hub: p.kind === "hub" }, geometry: { type: "Point" as const, coordinates: p.lngLat } })),
+          ]
+        : [],
+    });
+  }, [ready, props.scooterRules]);
+  useEffect(() => {
+    if (!ready) return;
+    const t = props.scooterTrip;
+    source(mapRef.current!, "scooter-trip").setData({
+      type: "FeatureCollection",
+      features: t
+        ? [
+            { type: "Feature", properties: { role: "scooter", label: "Spin scooter" }, geometry: { type: "Point", coordinates: t.scooter } },
+            { type: "Feature", properties: { role: "park", label: "Park here" }, geometry: { type: "Point", coordinates: t.parking.lngLat } },
+          ]
+        : [],
+    });
+  }, [ready, props.scooterTrip]);
 
   // Spin vehicles: every e-bike and scooter free to ride (not just the nearest few, unlike places).
   useEffect(() => {

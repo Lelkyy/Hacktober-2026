@@ -58,6 +58,11 @@ the way, using the paths, stairs and bike paths students actually use.
   MTS real-time API key).
 - **Spin e-bikes and scooters:** tap the spin button to see every Spin e-bike
   and scooter free to ride, with battery, range and directions.
+- **Spin scooter trips:** walk to the best free scooter, ride, park at a Spin
+  hub or bike rack where Spin allows it, and walk on. Scooters keep to roads and
+  bike paths, slow to 8 mph on shared paths, and are walked on footpaths, on
+  Library Walk and the other walks UCSD bars them from, and through Spin's
+  no-ride zones (any speed limits Spin sets are followed too).
 - **Campus places:** the 5 nearest restrooms, food spots, vending machines,
   water refill stations, study spots, bike racks, parking and more from UC San
   Diego's campus map, and directions to any of them.
