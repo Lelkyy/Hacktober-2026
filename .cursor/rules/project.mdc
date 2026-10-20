@@ -1,0 +1,22 @@
+---
+description: How this campus nav app is built and what not to break
+alwaysApply: true
+---
+
+# Triton Trails
+
+Browser-only. Routing, search, and schedules run in the tab. There is no app server. Static campus JSON is `apps/web/public/data/`. Longer architecture: `docs/DEVELOPMENT.md`.
+
+## Secrets
+
+`VITE_MTS_KEY` lives only in `apps/web/.env.local` (gitignored). Never commit it or put it in `.env.example`. Restart `npm run dev` after changing env.
+
+## Live vehicles
+
+Dots are the last GTFS-realtime GPS fix (`apps/web/src/mts.ts`, `packages/core/src/liveTransit.ts`). Do not plot OneBusAway `tripStatus.position`; that field is schedule-interpolated and can be kilometers off.
+
+MTS publishes fixes in batches ~30–40s. The client polls every 10s and does not move the marker between fixes. Read `context/problems.md` before changing live transit or adding UI.
+
+## UI
+
+Do not add controls, modes, or map chips until you have read `context/problems.md`. The screen is already too crowded for a usable live-bus view.

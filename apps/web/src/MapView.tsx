@@ -1,4 +1,5 @@
 import {
+  EdgeKind,
   haversine,
   type CampusGraph,
   type LiveVehicle,
@@ -6,10 +7,9 @@ import {
   type ParkingSpot,
   type RideZone,
   type SharedBike,
+  type TransitNetwork,
   type TransitStop,
-  type TripAhead,
 } from "@campus/core";
-import { fetchTripAhead } from "./mts.ts";
 import { ILLUSTRATED_TILES, registerIllustratedTiles } from "./illustratedTiles.ts";
 import {
   GeolocateControl,
@@ -59,10 +59,8 @@ export interface PlacePick {
   name: string;
 }
 const CAMPUS_CENTER: LngLat = [-117.2376, 32.8801];
-/** Room around the campus data's bounding box: enough to see the shore and ocean to the west. */
-const CAMPUS_PADDING_DEG = 0.006;
-/** Campus and the coast on a laptop screen. */
-const MIN_ZOOM = 13.5;
+/** Low enough to zoom out and see the whole bus and trolley fleet, not only campus. */
+const MIN_ZOOM = 9;
 const START_ZOOM = 15.6;
 
 /** One drawn piece of a route: walking (dotted blue), riding (green) or a shuttle (its route color). */
@@ -74,8 +72,19 @@ export interface RouteLine {
   keepRight?: boolean;
 }
 
-/** Updates in a row a followed vehicle can be missing from before its popup and route close. */
-const MISSING_UPDATES = 4;
+/** Walk, bike, and road edges, always drawn. */
+const PATH_COLOR: Record<number, string> = {
+  [EdgeKind.Path]: "#2F5A2E",
+  [EdgeKind.Steps]: "#9C7058",
+  [EdgeKind.Bike]: "#1F6B4A",
+  [EdgeKind.Custom]: "#2F5A2E",
+  [EdgeKind.Road]: "#6E675C",
+  [EdgeKind.BikeOnly]: "#1F6B4A",
+  [EdgeKind.Shared]: "#3D8F62",
+  [EdgeKind.Sidewalk]: "#5D8A35",
+  [EdgeKind.Gap]: "#8AAF6A",
+  [EdgeKind.Lot]: "#8A8478",
+};
 
 /** Shift for a ride on a road: about 3.5 m to the right of the centre line, at any zoom. */
 const KEEP_RIGHT_OFFSET: ExpressionSpecification = [
@@ -111,8 +120,10 @@ export interface MapViewProps {
   from: LngLat | null;
   to: LngLat | null;
   baseMap: BaseMap;
-  /** Live trolleys and buses, and the time the feed gave them (its times count from then), or null when off. */
+  /** Every live trolley and bus from the latest MTS poll. */
   live: { vehicles: LiveVehicle[]; at: number } | null;
+  /** Shuttle, bus, and trolley shapes from the built timetable. Drawn in full, not on hover. */
+  transit: TransitNetwork | null;
   /** Spin e-bikes and scooters free to ride (all drawn), or null when the Spin button is off. */
   spinBikes: SharedBike[] | null;
   /**
@@ -171,7 +182,7 @@ export function MapView(props: MapViewProps) {
       style: BASE_STYLE,
       center: visibleCenter(CAMPUS_CENTER, START_ZOOM),
       zoom: START_ZOOM,
-      maxBounds: campusBounds(props.graph.data.bbox),
+      maxBounds: [[-117.7, 32.5], [-116.8, 33.4]],
       minZoom: MIN_ZOOM,
       attributionControl: { compact: true },
     });
@@ -254,9 +265,23 @@ export function MapView(props: MapViewProps) {
       });
       for (const layer of UCSD_LAYERS) map.addLayer({ ...layer, layout: { ...layer.layout, visibility: "none" } } as LayerSpecification);
 
-      for (const id of ["route", "connectors", "stops", "doors", "day", "places", "spin", "vehicle-ahead", "scooter-rules", "scooter-trip"]) {
+      for (const id of ["network", "transit-lines", "route", "connectors", "stops", "doors", "day", "places", "spin", "vehicle-ahead", "scooter-rules", "scooter-trip"]) {
         map.addSource(id, { type: "geojson", data: EMPTY });
       }
+      map.addLayer({
+        id: "network",
+        type: "line",
+        source: "network",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": ["get", "color"], "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1, 16, 3], "line-opacity": 0.9 },
+      });
+      map.addLayer({
+        id: "transit-lines",
+        type: "line",
+        source: "transit-lines",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": ["get", "color"], "line-width": ["interpolate", ["linear"], ["zoom"], 9, 1.5, 15, 4], "line-opacity": 0.85 },
+      });
       // UCSD's places, under everything of the app's; names once zoomed in.
       map.addLayer({
         id: "places",
@@ -630,6 +655,49 @@ export function MapView(props: MapViewProps) {
     for (const layer of UCSD_LAYERS) map.setLayoutProperty(layer.id, "visibility", vis(props.baseMap === "campus"));
   }, [ready, props.baseMap]);
 
+  // Every campus path, as soon as the graph is loaded. Not gated on hover.
+  useEffect(() => {
+    if (!ready) return;
+    const g = props.graph;
+    const groups = new Map<number, LngLat[][]>();
+    for (let e = 0; e < g.edgeCount; e++) {
+      const kind = g.edgeKind[e];
+      const line: LngLat[] = [
+        [g.lon[g.edgeFrom[e]], g.lat[g.edgeFrom[e]]],
+        [g.lon[g.edgeTo[e]], g.lat[g.edgeTo[e]]],
+      ];
+      const list = groups.get(kind) ?? [];
+      list.push(line);
+      groups.set(kind, list);
+    }
+    source(mapRef.current!, "network").setData({
+      type: "FeatureCollection",
+      features: [...groups].map(([kind, coordinates]) => ({
+        type: "Feature" as const,
+        properties: { color: PATH_COLOR[kind] ?? PALETTE.olive },
+        geometry: { type: "MultiLineString" as const, coordinates },
+      })),
+    });
+  }, [ready, props.graph]);
+
+  // Every shuttle, bus, and trolley shape from the timetable, always.
+  useEffect(() => {
+    if (!ready || !props.transit) return;
+    const { routes, patterns } = props.transit.data;
+    source(mapRef.current!, "transit-lines").setData({
+      type: "FeatureCollection",
+      features: patterns.flatMap((p) =>
+        p.shape.length > 1
+          ? [{
+              type: "Feature" as const,
+              properties: { color: routes[p.route]?.color ?? "#4A6497" },
+              geometry: { type: "LineString" as const, coordinates: p.shape },
+            }]
+          : [],
+      ),
+    });
+  }, [ready, props.transit]);
+
   // Places: the few nearest of each kind shown, to you (or to the middle of the map), not the whole campus.
   const anchor = props.userPos ?? mapCentre;
   useEffect(() => {
@@ -656,32 +724,17 @@ export function MapView(props: MapViewProps) {
     });
   }, [ready, props.places, props.placeCategories, anchor?.[0], anchor?.[1]]);
 
-  // Live trolleys and buses: a marker for each one in or near view, exactly at its last GPS fix,
-  // in its line's color, with an arrow the way it last moved and how long ago the fix was taken.
-  // Nothing is estimated in between: a marker moves when a new fix comes.
+  // Every trolley and bus from the latest poll, including ones off the current view.
+  // A marker stays on its last GPS fix until the next one arrives.
   const vehicleMarkers = useRef(new Map<string, { marker: Marker; vehicle: LiveVehicle }>());
-  /** Bumped when the map stops moving: which vehicles are in view changes. */
-  const [viewMoved, setViewMoved] = useState(0);
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!ready || !map) return;
-    const moved = () => setViewMoved((n) => n + 1);
-    map.on("moveend", moved);
-    return () => {
-      map.off("moveend", moved);
-    };
-  }, [ready]);
+  /** The vehicle whose card is open, so its age line can keep counting. */
+  const selected = useRef<string | null>(null);
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map) return;
     const markers = vehicleMarkers.current;
-    // In view, with a margin of half the view on each side (so panning a little finds them there).
-    const b = map.getBounds();
-    const [dx, dy] = [(b.getEast() - b.getWest()) / 2, (b.getNorth() - b.getSouth()) / 2];
-    const inView = (v: LiveVehicle) =>
-      v.lngLat[0] > b.getWest() - dx && v.lngLat[0] < b.getEast() + dx && v.lngLat[1] > b.getSouth() - dy && v.lngLat[1] < b.getNorth() + dy;
     const all = props.live?.vehicles ?? [];
-    const shown = new Map(all.filter((v) => inView(v) || v.id === selected.current).map((v) => [v.id, v]));
+    const shown = new Map(all.map((v) => [v.id, v]));
     for (const [id, m] of markers) if (!shown.has(id)) (m.marker.remove(), markers.delete(id));
     for (const v of shown.values()) {
       let m = markers.get(v.id);
@@ -692,20 +745,15 @@ export function MapView(props: MapViewProps) {
           e.stopPropagation();
           const { vehicle } = markers.get(v.id)!;
           popup.current?.remove();
-          ahead.current = null;
+          selected.current = vehicle.id;
           const card = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup", offset: 18 })
             .setLngLat(vehicle.lngLat)
-            .setDOMContent(vehicleCard(vehicle, null))
+            .setDOMContent(vehicleCard(vehicle))
             .addTo(map);
-          popup.current = card;
-          // Follow this vehicle: its route ahead, until its popup closes.
-          selected.current = vehicle.id;
           card.on("close", () => {
-            if (selected.current !== vehicle.id) return;
-            selected.current = null;
-            showAhead(null);
+            if (selected.current === vehicle.id) selected.current = null;
           });
-          void loadAhead(vehicle);
+          popup.current = card;
         });
         markers.set(v.id, m);
       } else if (m.vehicle.fixAt !== v.fixAt) {
@@ -720,19 +768,9 @@ export function MapView(props: MapViewProps) {
     }
     turnArrows();
     showAges();
-    // The followed vehicle: to its new fix, with its route ahead from there.
-    const followed = selected.current ? all.find((v) => v.id === selected.current) : undefined;
-    missing.current = selected.current && !followed ? missing.current + 1 : 0;
-    if (selected.current && !followed && missing.current >= MISSING_UPDATES) {
-      // Gone for a while (trip over, or out of service): stop following it.
-      selected.current = null;
-      popup.current?.remove();
-      showAhead(null);
-    } else if (followed) {
-      popup.current?.setLngLat(followed.lngLat);
-      if (!ahead.current || ahead.current.vehicle.fixAt !== followed.fixAt || ahead.current.vehicle.tripId !== followed.tripId) void loadAhead(followed);
-    }
-  }, [ready, props.live, viewMoved]);
+    const followed = selected.current ? shown.get(selected.current) : undefined;
+    if (followed) popup.current?.setLngLat(followed.lngLat);
+  }, [ready, props.live]);
 
   // How long ago each fix was taken, counting up every second (on the markers and the open card).
   const showAges = () => {
@@ -744,7 +782,6 @@ export function MapView(props: MapViewProps) {
     const open = selected.current ? vehicleMarkers.current.get(selected.current) : undefined;
     const line = popup.current?.getElement()?.querySelector(".vehicle-fix");
     if (open && line) line.textContent = `GPS position from ${fixAge(now - open.vehicle.fixAt)}`;
-    if (ahead.current) drawAhead();
   };
   useEffect(() => {
     if (!props.live) return;
@@ -752,54 +789,6 @@ export function MapView(props: MapViewProps) {
     return () => clearInterval(timer);
   }, [props.live]);
 
-  /** The trolley or bus whose route ahead is shown (its popup is open). */
-  const selected = useRef<string | null>(null);
-  /** The followed vehicle's route ahead from its fix (its stops and MTS's times). */
-  const ahead = useRef<{ vehicle: LiveVehicle; trip: TripAhead } | null>(null);
-  /** Updates in a row the followed vehicle has been missing from. */
-  const missing = useRef(0);
-  /** Show (or clear) a vehicle's route ahead, and what its card says about it. */
-  const showAhead = (next: { vehicle: LiveVehicle; trip: TripAhead } | null) => {
-    ahead.current = next;
-    if (next && selected.current === next.vehicle.id) popup.current?.setDOMContent(vehicleCard(next.vehicle, next.trip));
-    drawAhead();
-  };
-  /** The route ahead: from the vehicle's fix to the end of its trip, with its stops still to come. */
-  const drawAhead = () => {
-    const map = mapRef.current;
-    if (!map) return;
-    const a = ahead.current;
-    if (!a) return source(map, "vehicle-ahead").setData(EMPTY);
-    const clock = Date.now();
-    source(map, "vehicle-ahead").setData({
-      type: "FeatureCollection",
-      features: [
-        ...(a.trip.path.length > 1 ? [{ ...lineFeature(a.trip.path), properties: { color: a.vehicle.color } }] : []),
-        ...a.trip.stops.map((s) => {
-          const min = Math.round((s.at - clock) / 60_000);
-          return {
-            type: "Feature" as const,
-            properties: {
-              color: a.vehicle.color,
-              name: s.name,
-              when: min <= 0 ? "now" : min < 60 ? `${min} min` : new Date(s.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
-            },
-            geometry: { type: "Point" as const, coordinates: s.lngLat },
-          };
-        }),
-      ],
-    });
-  };
-  const loadAhead = async (vehicle: LiveVehicle) => {
-    if (!vehicle.tripId) return;
-    try {
-      const trip = await fetchTripAhead(vehicle.tripId, vehicle.lngLat);
-      // Still following the same vehicle?
-      if (selected.current === vehicle.id) showAhead({ vehicle, trip });
-    } catch {
-      // Keep whatever's drawn; its next fix tries again.
-    }
-  };
   // Arrows point the way on the map: allow for the map being rotated.
   const turnArrows = () => {
     const bearing = mapRef.current?.getBearing() ?? 0;
@@ -1026,23 +1015,6 @@ export function MapView(props: MapViewProps) {
 /** Map pixels per degree of longitude at a zoom level. */
 function pxPerDegree(zoom: number): number {
   return (256 * 2 ** zoom) / 360;
-}
-
-/**
- * How far the map may pan: the campus data's box plus some coast, plus as much
- * again as the panel covers (on the left on a laptop, the bottom on a phone),
- * so nothing is stuck under the search panel.
- */
-function campusBounds([w, s, e, n]: [number, number, number, number]): [[number, number], [number, number]] {
-  const pad = fitPadding();
-  const perDeg = pxPerDegree(MIN_ZOOM);
-  const cos = Math.cos((((s + n) / 2) * Math.PI) / 180);
-  const lon = (px: number) => px / perDeg;
-  const lat = (px: number) => (px * cos) / perDeg;
-  return [
-    [w - CAMPUS_PADDING_DEG - lon(pad.left), s - CAMPUS_PADDING_DEG - lat(pad.bottom)],
-    [e + CAMPUS_PADDING_DEG + lon(pad.right), n + CAMPUS_PADDING_DEG + lat(pad.top)],
-  ];
 }
 
 /** The map center that puts `at` in the middle of the part of the map the panel doesn't cover. */
@@ -1272,23 +1244,15 @@ function fixAge(ms: number, short = false): string {
   return s < 90 ? `${s} s ago` : `${Math.round(s / 60)} min ago`;
 }
 
-/** What a tapped trolley or bus says: its line, where it's going and its next stop (once its trip is loaded), and how old its position is. */
-function vehicleCard(v: LiveVehicle, trip: TripAhead | null): HTMLElement {
+/** What a tapped trolley or bus says: its line and how old its GPS fix is. */
+function vehicleCard(v: LiveVehicle): HTMLElement {
   const el = document.createElement("div");
   const title = document.createElement("strong");
-  title.textContent = `${v.mode === "bus" ? `Route ${v.line}` : v.line}${trip?.headsign ? ` to ${trip.headsign}` : ""}`;
+  title.textContent = v.mode === "bus" ? `Route ${v.line}` : v.line;
   const fix = document.createElement("span");
   fix.className = "place-popup-meta vehicle-fix";
   fix.textContent = `GPS position from ${fixAge(Date.now() - v.fixAt)}`;
   el.append(title, fix);
-  const next = trip?.stops[0];
-  if (next) {
-    const meta = document.createElement("span");
-    meta.className = "place-popup-meta";
-    const min = Math.round((next.at - Date.now()) / 60_000);
-    meta.textContent = `Next stop: ${next.name}, ${min <= 0 ? "due now" : `in ${min} min`} (MTS's estimate)`;
-    el.append(meta);
-  }
   return el;
 }
 
