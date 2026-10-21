@@ -142,6 +142,15 @@ export function formatTime(d: Date): string {
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
+/** "in 12 min", or "in 5 hr 32 min" once the wait is an hour or longer. */
+export function formatLead(min: number): string {
+  if (min <= 0) return "due";
+  if (min < 60) return `in ${min} min`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m === 0 ? `in ${h} hr` : `in ${h} hr ${m} min`;
+}
+
 export function formatDistance(meters: number): string {
   const feet = meters * 3.28084;
   return feet < 1000 ? `${Math.round(feet / 10) * 10} ft` : `${(meters / 1609.344).toFixed(2)} mi`;

@@ -30,9 +30,15 @@ import {
   type SharedBike,
   type LiveVehicle,
   type TransitStop,
-  linesAtStop,
-  shapesAtStop,
+  linesAtStops,
+  stopsOnLinesThrough,
+  shapesAtStops,
   spreadOverlappingLines,
+  clusterSameNameStops,
+  clusteredStop,
+  sameNameCluster,
+  approachBearings,
+  sharedApproach,
   planScooterTrip,
   parkingSpots,
   scooterProfile,
@@ -52,7 +58,7 @@ import { fetchSpinVehicles, fetchSpinZones, SPIN_REFRESH_MS } from "./spin.ts";
 import { LiveTransitButton, StopsButton } from "./LiveTransitButton.tsx";
 import { fetchLiveVehicles, MTS_LIVE, LIVE_REFRESH_MS } from "./mts.ts";
 import { MapView, type BaseMap, type CampusPlaces, type DayOverlay, type RouteLine } from "./MapView.tsx";
-import { lineColor, lineMark, stopLogoColors } from "./lineColor.ts";
+import { lineBadges, lineColor } from "./lineColor.ts";
 import { StopPanel } from "./StopPanel.tsx";
 import {
   BikeIcon,
@@ -147,8 +153,9 @@ export function App() {
       ? setLiveModes((m) => ({ ...m, [mode]: !m[mode] }))
       : setHint("Live trolleys and buses need an MTS real-time API key: request one at sdmts.com, then set VITE_MTS_KEY in apps/web/.env.local.");
   const [openStop, setOpenStop] = useState<TransitStop | null>(null);
-  const [showTransitStops, setShowTransitStops] = useState(() => storage.get("campus-nav:transit-stops", false));
-  useEffect(() => storage.set("campus-nav:transit-stops", showTransitStops), [showTransitStops]);
+  /** One line at the open stop, when a route chip in the panel is selected. */
+  const [openRouteId, setOpenRouteId] = useState<string | null>(null);
+  const [showTransitStops, setShowTransitStops] = useState(false);
   // Small GPS jitter would re-plan everything that starts from your location; move the dot every ~10 m.
   const setMyLocation = useCallback(
     (p: LngLat) => setMyLocationRaw((cur) => (cur && haversine(cur[0], cur[1], p[0], p[1]) < 10 ? cur : p)),
@@ -434,24 +441,50 @@ export function App() {
   const fetchLive = liveOn || (MTS_LIVE && routeLiveShorts.length > 0);
   const shownLive = useMemo(() => {
     if (!live) return null;
-    const vehicles = live.vehicles.filter((v) => liveModes[v.mode] || routeLiveShorts.includes(v.route));
+    const vehicles = live.vehicles
+      .filter((v) => liveModes[v.mode] || routeLiveShorts.includes(v.route))
+      .map((v) => ({ ...v, color: lineColor({ short: v.route, color: v.color, mode: v.mode }) }));
     return { at: live.at, vehicles };
   }, [live, liveModes, routeLiveShorts]);
+  const openStopIds = useMemo(() => {
+    if (!data || !openStop) return [];
+    const members = sameNameCluster(data.transit.data.stops, openStop);
+    return (members.length ? members : [openStop]).map((s) => s.id);
+  }, [data, openStop]);
+  const routeStopIds = useMemo(() => {
+    if (!data || !openStop) return new Set<string>();
+    return new Set(stopsOnLinesThrough(data.transit, openStopIds.length ? openStopIds : [openStop.id]));
+  }, [data, openStop, openStopIds]);
   const logoStops = useMemo(() => {
     if (!data) return [];
-    const stops = showTransitStops ? data.transit.data.stops : openStop ? [openStop] : [];
-    return stops.map((stop) => {
-      const lines = linesAtStop(data.transit, stop.id).map((x) => x.route);
-      return { stop, colors: stopLogoColors(lines), mark: lines.length === 1 ? lineMark(lines[0]) : undefined };
-    });
-  }, [data, showTransitStops, openStop]);
+    return clusterSameNameStops(data.transit.data.stops)
+      .filter((members) => members.length > 0)
+      .flatMap((members) => {
+        const ids = members.map((s) => s.id);
+        const routes = linesAtStops(data.transit, ids).map((x) => x.route);
+        if (!routes.length) return [];
+        const approach = sharedApproach(ids.flatMap((id) => approachBearings(data.transit, id)));
+        return [
+          {
+            stop: clusteredStop(members),
+            ids,
+            lines: lineBadges(routes),
+            onRoute: ids.some((id) => routeStopIds.has(id)),
+            ...(approach !== null ? { approach } : {}),
+          },
+        ];
+      });
+  }, [data, routeStopIds]);
   const stopRoutes = useMemo(() => {
     if (!data || !openStop) return [];
-    const raw = shapesAtStop(data.transit, openStop.id);
+    const raw = shapesAtStops(data.transit, openStopIds.length ? openStopIds : [openStop.id]).filter(
+      (s) => !openRouteId || s.route.id === openRouteId,
+    );
     const spread = spreadOverlappingLines(raw.map((s) => s.shape));
     return raw.map((s, i) => ({ coordinates: spread[i], color: lineColor(s.route) }));
-  }, [data, openStop]);
+  }, [data, openStop, openStopIds, openRouteId]);
   useEffect(() => setOpenStop(null), [route]);
+  useEffect(() => setOpenRouteId(null), [openStop?.id]);
 
   // Walking: point out transit when it's clearly faster.
   const busSuggestion = useMemo(() => {
@@ -813,13 +846,16 @@ export function App() {
           scooterRules={scooterRules}
           scooterTrip={mode === "scooter" && scooterTrip && !showingDay ? { scooter: scooterTrip.scooter.lngLat, parking: scooterTrip.parking } : null}
           live={shownLive}
+          showTransitStops={showTransitStops && !showingDay}
           logoStops={showingDay ? [] : logoStops}
           stopRoutes={showingDay ? [] : stopRoutes}
           onStopClick={(s) => {
             if (openStop?.id === s.id) {
+              setOpenRouteId(null);
               setOpenStop(null);
               return;
             }
+            setOpenRouteId(null);
             setOpenStop(s);
             setTab("go");
             setSheetOpen(true);
@@ -1092,7 +1128,19 @@ export function App() {
                   <button onClick={() => setMode("bus")}>Take it</button>
                 </div>
               )}
-              {openStop && <StopPanel stop={openStop} transit={data.transit} onBack={() => setOpenStop(null)} />}
+              {openStop && (
+                <StopPanel
+                  stop={openStop}
+                  stopIds={openStopIds}
+                  transit={data.transit}
+                  routeId={openRouteId}
+                  onRoute={setOpenRouteId}
+                  onBack={() => {
+                    setOpenRouteId(null);
+                    setOpenStop(null);
+                  }}
+                />
+              )}
               {route && to && !openStop && (
                 <>
                   <Itinerary

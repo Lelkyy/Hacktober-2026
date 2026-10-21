@@ -249,8 +249,15 @@ button.link.danger { color: var(--danger); }
   border: 2px solid #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
 }
-.trolley.bus .trolley-badge { border-radius: 50%; font-size: 10px; font-weight: 800; letter-spacing: -0.02em; }
-.trolley.bus { width: 28px; height: 28px; }
+.trolley.bus { width: 44px; height: 30px; }
+.trolley.bus .trolley-badge {
+  inset: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--line, #4a6497);
+}
 .trolley-arrow { position: absolute; inset: -9px; transform: rotate(var(--heading, 0deg)); display: none; pointer-events: none; }
 .trolley.has-heading .trolley-arrow { display: block; }
 /* How long ago the position was taken, under the badge. */
@@ -353,12 +360,44 @@ button.link.danger { color: var(--danger); }
 .leg-coming { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .leg-coming-time { font-weight: 700; }
 .stop-link-inline { font-size: inherit; }
+.stop-logos {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.stop-panel-head .stop-logos { flex-wrap: wrap; max-width: 220px; }
 .stop-badge {
+  position: relative;
   display: inline-grid;
   place-items: center;
-  border-radius: 50%;
+  flex: none;
+  border-radius: 5px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
   line-height: 0;
+  overflow: visible;
+}
+/* Arrow: the way a bus is facing as it arrives. Hidden when lines disagree. */
+.stop-approach {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 56px;
+  height: 56px;
+  margin: -28px 0 0 -28px;
+  transform: rotate(var(--heading, 0deg));
+  pointer-events: none;
+}
+.stop-approach::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  transform: translateX(-50%);
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-bottom: 13px solid var(--line, #243024);
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.45));
 }
 .stop-badge.on, .stop-mark.on .stop-badge { box-shadow: 0 0 0 3px var(--accent), 0 1px 4px rgba(0, 0, 0, 0.28); }
 .stop-mark {
@@ -368,6 +407,7 @@ button.link.danger { color: var(--danger); }
   width: 28px;
   height: 28px;
   cursor: pointer;
+  overflow: visible;
 }
 .stop-panel-head { display: flex; align-items: flex-start; gap: 12px; }
 .stop-panel-head h2 { margin: 0; font-size: 18px; line-height: 1.25; }
@@ -388,6 +428,7 @@ button.link.danger { color: var(--danger); }
 .place-popup .maplibregl-popup-content { padding: 10px 12px; border-radius: 12px; background: var(--surface); color: var(--text); font: 13px var(--font); box-shadow: var(--shadow); }
 .place-popup .maplibregl-popup-content > div { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding-right: 12px; }
 .place-popup .maplibregl-popup-tip { border-top-color: var(--surface); border-bottom-color: var(--surface); }
+.vehicle-popup .maplibregl-popup-tip { display: none; }
 .place-popup-meta { color: var(--muted); font-size: 12px; }
 .place-popup button.primary { margin-top: 4px; }
 
@@ -527,6 +568,18 @@ button.link.danger { color: var(--danger); }
   font-size: 11px;
   text-align: center;
 }
+button.route-badge {
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  font-size: 11px;
+  line-height: 1.6;
+}
+button.route-badge.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--route); }
+button.route-badge.all { background: var(--accent); color: var(--accent-text); }
+button.route-badge.all.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+.stop-line-hint { margin: -4px 0 0; }
 .empty-hint { margin: 4px 0 0; }
 
 /* ---------- Schedule ---------- */

@@ -26,7 +26,8 @@ import {
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PALETTE } from "./palette.ts";
-import { formatDistance } from "./Itinerary.tsx";
+import { formatDistance, formatLead } from "./Itinerary.tsx";
+import type { LineBadge } from "./lineColor.ts";
 import { stopBadgeElement } from "./StopBadge.tsx";
 // MapLibre 6 derives its worker URL at runtime, which bundlers can't see; have Vite bundle it.
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
@@ -109,8 +110,9 @@ export interface MapViewProps {
   connectors: [LngLat, LngLat][];
   stops: TransitStop[];
   showStops: boolean;
-  /** Optional colour-coded stop logos (Stops button). Does not replace `stops`. */
-  logoStops?: { stop: TransitStop; colors: string[]; mark?: string }[];
+  /** Stop logos. The Stops button shows the thinned set; an open route shows every stop on it. */
+  showTransitStops?: boolean;
+  logoStops?: { stop: TransitStop; lines: LineBadge[]; onRoute?: boolean; approach?: number }[];
   onStopClick?: (stop: TransitStop) => void;
   /** Lines through the selected stop (one per route / direction). */
   stopRoutes?: { coordinates: LngLat[]; color: string }[];
@@ -163,6 +165,10 @@ export function MapView(props: MapViewProps) {
   const markers = useRef<{ from: Marker; to: Marker; report: Marker; user: Marker; room: Marker } | null>(null);
   const roomLabel = useRef<HTMLSpanElement | null>(null);
   const [ready, setReady] = useState(false);
+  /** Route number of the bus or trolley whose popup is open, so every stop on that route stays drawn. */
+  const [focusRoute, setFocusRoute] = useState<string | null>(null);
+  const setFocusRouteRef = useRef(setFocusRoute);
+  setFocusRouteRef.current = setFocusRoute;
   /** The middle of the map, for the nearest places when we don't know where you are. */
   const [mapCentre, setMapCentre] = useState<LngLat | null>(null);
   const lastTrip = useRef<string | null>(null);
@@ -667,6 +673,7 @@ export function MapView(props: MapViewProps) {
       if (bike && bike.geometry.type === "Point") {
         selected.current = null;
         ahead.current = null;
+        setFocusRouteRef.current(null);
         if (map.getSource("vehicle-ahead")) source(map, "vehicle-ahead").setData(EMPTY);
         callbacks.current.onClearOverlay?.();
         const at = bike.geometry.coordinates as LngLat;
@@ -690,6 +697,7 @@ export function MapView(props: MapViewProps) {
       if (hit && hit.geometry.type === "Point") {
         selected.current = null;
         ahead.current = null;
+        setFocusRouteRef.current(null);
         if (map.getSource("vehicle-ahead")) source(map, "vehicle-ahead").setData(EMPTY);
         callbacks.current.onClearOverlay?.();
         const at = hit.geometry.coordinates as LngLat;
@@ -708,6 +716,7 @@ export function MapView(props: MapViewProps) {
       if (selected.current || callbacks.current.selectedStopId) {
         selected.current = null;
         ahead.current = null;
+        setFocusRouteRef.current(null);
         popup.current?.remove();
         if (map.getSource("vehicle-ahead")) source(map, "vehicle-ahead").setData(EMPTY);
         callbacks.current.onClearOverlay?.();
@@ -807,19 +816,23 @@ export function MapView(props: MapViewProps) {
           callbacks.current.onClearOverlay?.();
           selected.current = null;
           ahead.current = null;
+          setFocusRoute(null);
           popup.current?.remove();
           showAhead(null);
           if (same) return;
-          const card = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup", offset: 18 })
+          const beside = popupBeside(vehicle.heading);
+          const card = new Popup({ closeButton: true, maxWidth: "220px", className: "place-popup vehicle-popup", anchor: beside.anchor, offset: beside.offset })
             .setLngLat(vehicle.lngLat)
             .setDOMContent(vehicleCard(vehicle, null))
             .addTo(map);
           popup.current = card;
           // Follow this vehicle: its route ahead, until its popup closes.
           selected.current = vehicle.id;
+          setFocusRoute(vehicle.route);
           card.on("close", () => {
             if (selected.current !== vehicle.id) return;
             selected.current = null;
+            setFocusRoute(null);
             showAhead(null);
           });
           void loadAhead(vehicle);
@@ -844,10 +857,14 @@ export function MapView(props: MapViewProps) {
     if (selected.current && !followed && missing.current >= MISSING_UPDATES) {
       // Gone for a while (trip over, or out of service): stop following it.
       selected.current = null;
+      setFocusRoute(null);
       popup.current?.remove();
       showAhead(null);
-    } else if (followed) {
-      popup.current?.setLngLat(followed.lngLat);
+    } else if (followed && popup.current) {
+      popup.current.setLngLat(followed.lngLat);
+      const trip = ahead.current?.vehicle.id === followed.id ? ahead.current.trip : undefined;
+      if (trip) placePopupClear(map, popup.current, followed.lngLat, [trip.path, trip.behind], stopLngLats(trip), followed.heading);
+      else placePopupBeside(popup.current, followed.heading);
       if (!ahead.current || ahead.current.vehicle.fixAt !== followed.fixAt || ahead.current.vehicle.tripId !== followed.tripId) void loadAhead(followed);
     }
   }, [ready, props.live, viewMoved]);
@@ -909,6 +926,9 @@ export function MapView(props: MapViewProps) {
         }),
       ],
     });
+    if (popup.current && selected.current === a.vehicle.id) {
+      placePopupClear(map, popup.current, a.vehicle.lngLat, [a.trip.path, a.trip.behind], stopLngLats(a.trip), a.vehicle.heading);
+    }
   };
   const loadAhead = async (vehicle: LiveVehicle) => {
     if (!vehicle.tripId) return;
@@ -924,6 +944,7 @@ export function MapView(props: MapViewProps) {
   useEffect(() => {
     if (!props.selectedStopId || !selected.current) return;
     selected.current = null;
+    setFocusRoute(null);
     popup.current?.remove();
     showAhead(null);
   }, [props.selectedStopId]);
@@ -946,6 +967,11 @@ export function MapView(props: MapViewProps) {
       const el = marker.getElement();
       el.style.setProperty("--heading", `${Number(el.dataset.heading) - bearing}deg`);
     }
+    mapRef.current?.getContainer().querySelectorAll<HTMLElement>(".stop-mark[data-approach]").forEach((el) => {
+      const heading = `${Number(el.dataset.approach) - bearing}deg`;
+      el.style.setProperty("--heading", heading);
+      el.querySelector<HTMLElement>(".stop-approach")?.style.setProperty("--heading", heading);
+    });
   };
   useEffect(() => {
     const map = mapRef.current;
@@ -1055,16 +1081,31 @@ export function MapView(props: MapViewProps) {
     const map = mapRef.current;
     if (!ready || !map) return;
     const markers = stopLogos.current;
-    const shown = props.logoStops ?? [];
+    const onThisRoute = (s: { lines: LineBadge[]; onRoute?: boolean }) =>
+      !!s.onRoute || (!!focusRoute && s.lines.some((l) => l.short === focusRoute));
+    const pool = (props.logoStops ?? []).filter((s) => props.showTransitStops || onThisRoute(s));
+    const shown = stopsInView(map, pool);
     const keep = new Set(shown.map((s) => s.stop.id));
     for (const [id, m] of markers) if (!keep.has(id)) (m.remove(), markers.delete(id));
-    for (const s of shown) {
+    const zoom = map.getZoom();
+    const size = zoom < 15 ? 20 : zoom < 16.5 ? 24 : 28;
+    const arrow = zoom >= 14.5;
+    // Selected stop last so its opened squares paint above anything stacked on the same point.
+    const ordered = [...shown].sort((a, b) => (a.stop.id === props.selectedStopId ? 1 : b.stop.id === props.selectedStopId ? -1 : 0));
+    for (const s of ordered) {
       markers.get(s.stop.id)?.remove();
-      const el = stopBadgeElement(s.colors, s.mark, s.stop.id === props.selectedStopId);
+      const approach = arrow || s.stop.id === props.selectedStopId ? s.approach : undefined;
+      const el = stopBadgeElement(s.lines, s.stop.id === props.selectedStopId, approach, size);
+      if (s.approach !== undefined) {
+        const heading = `${s.approach - map.getBearing()}deg`;
+        el.style.setProperty("--heading", heading);
+        el.querySelector<HTMLElement>(".stop-approach")?.style.setProperty("--heading", heading);
+      }
       el.title = s.stop.name;
       el.setAttribute("aria-label", s.stop.name);
       el.addEventListener("click", (e) => {
         e.stopPropagation();
+        setFocusRoute(null);
         callbacks.current.onStopClick?.(s.stop);
       });
       markers.set(s.stop.id, new Marker({ element: el, anchor: "center" }).setLngLat(s.stop.lngLat).addTo(map));
@@ -1073,7 +1114,7 @@ export function MapView(props: MapViewProps) {
       for (const m of markers.values()) m.remove();
       markers.clear();
     };
-  }, [ready, props.logoStops, props.selectedStopId]);
+  }, [ready, props.logoStops, props.showTransitStops, props.selectedStopId, focusRoute, viewMoved]);
 
   // The day view's walks and pins, framed whenever the day (or the choice of classes) changes.
   const lastDay = useRef("");
@@ -1368,9 +1409,114 @@ const UCSD_GROUND: LayerSpecification[] = [
 ];
 
 /**
+ * Puts the bus card beside the route and a little behind the bus, so the card grows away from the
+ * line instead of sitting on top of it. The anchor is the card's near corner.
+ */
+function popupBeside(heading?: number): { anchor: "top-left" | "top-right" | "bottom-left" | "bottom-right"; offset: [number, number] } {
+  const clear = 46;
+  if (heading === undefined || !Number.isFinite(heading)) return { anchor: "bottom-left", offset: [clear, -clear] };
+  const rad = ((((heading % 360) + 360) % 360) * Math.PI) / 180;
+  // Right of the direction of travel, plus a nudge back along the trail (screen x right, y down).
+  let x = Math.cos(rad) - Math.sin(rad) * 0.55;
+  let y = Math.sin(rad) + Math.cos(rad) * 0.55;
+  const len = Math.hypot(x, y) || 1;
+  x /= len;
+  y /= len;
+  const anchor = x >= 0 ? (y >= 0 ? "top-left" : "bottom-left") : y >= 0 ? "top-right" : "bottom-right";
+  return { anchor, offset: [Math.round(x * clear), Math.round(y * clear)] };
+}
+
+function placePopupBeside(popup: Popup, heading?: number) {
+  const beside = popupBeside(heading);
+  popup.options.anchor = beside.anchor;
+  popup.setOffset(beside.offset);
+}
+
+function stopLngLats(trip: TripAhead): LngLat[] {
+  return [...trip.stops.map((s) => s.lngLat), ...trip.passed.map((s) => s.lngLat)];
+}
+
+/**
+ * Slides the open bus card to whichever side of the vehicle the route does not run through.
+ * Keeps the current side when several sides are equally clear, so the card does not hop.
+ */
+function placePopupClear(map: MlMap, popup: Popup, lngLat: LngLat, paths: LngLat[][], points: LngLat[], heading?: number) {
+  const el = popup.getElement();
+  const w = el?.offsetWidth || 220;
+  const h = el?.offsetHeight || 110;
+  const origin = map.project(lngLat);
+  const gap = 28;
+  const candidates: { anchor: NonNullable<Popup["options"]["anchor"]>; offset: [number, number]; left: number; top: number }[] = [
+    { anchor: "top-left", offset: [gap, gap], left: origin.x + gap, top: origin.y + gap },
+    { anchor: "top-right", offset: [-gap, gap], left: origin.x - gap - w, top: origin.y + gap },
+    { anchor: "bottom-left", offset: [gap, -gap], left: origin.x + gap, top: origin.y - gap - h },
+    { anchor: "bottom-right", offset: [-gap, -gap], left: origin.x - gap - w, top: origin.y - gap - h },
+    { anchor: "left", offset: [gap, 0], left: origin.x + gap, top: origin.y - h / 2 },
+    { anchor: "right", offset: [-gap, 0], left: origin.x - gap - w, top: origin.y - h / 2 },
+    { anchor: "top", offset: [0, gap], left: origin.x - w / 2, top: origin.y + gap },
+    { anchor: "bottom", offset: [0, -gap], left: origin.x - w / 2, top: origin.y - gap - h },
+  ];
+  const screen: { x: number; y: number }[] = [];
+  const addPoint = (lngLat: LngLat) => {
+    const p = map.project(lngLat);
+    screen.push(p);
+  };
+  for (const path of paths) {
+    for (let i = 0; i < path.length; i++) {
+      addPoint(path[i]);
+      if (i === 0) continue;
+      const prev = map.project(path[i - 1]);
+      const here = screen[screen.length - 1];
+      const dist = Math.hypot(here.x - prev.x, here.y - prev.y);
+      const steps = Math.min(6, Math.floor(dist / 28));
+      for (let s = 1; s <= steps; s++) {
+        const t = s / (steps + 1);
+        screen.push({ x: prev.x + (here.x - prev.x) * t, y: prev.y + (here.y - prev.y) * t });
+      }
+    }
+  }
+  for (const p of points) addPoint(p);
+  const hits = (left: number, top: number) => {
+    const right = left + w;
+    const bottom = top + h;
+    let n = 0;
+    for (const p of screen) if (p.x >= left - 4 && p.x <= right + 4 && p.y >= top - 4 && p.y <= bottom + 4) n++;
+    return n;
+  };
+  const preferred = popupBeside(heading).anchor;
+  let best = candidates.find((c) => c.anchor === popup.options.anchor) ?? candidates.find((c) => c.anchor === preferred) ?? candidates[0];
+  let bestHits = hits(best.left, best.top);
+  for (const c of candidates) {
+    const n = hits(c.left, c.top);
+    if (n < bestHits) {
+      best = c;
+      bestHits = n;
+    }
+  }
+  popup.options.anchor = best.anchor;
+  popup.setOffset(best.offset);
+}
+
+/** Every stop logo inside the view, at any zoom. A later pass slides ones that overlap out to the side. */
+function stopsInView<T extends { stop: TransitStop }>(map: MlMap, stops: T[]): T[] {
+  const canvas = map.getCanvas();
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  const margin = 64;
+  return stops.filter((s) => {
+    const p = map.project(s.stop.lngLat);
+    return p.x >= -margin && p.y >= -margin && p.x <= w + margin && p.y <= h + margin;
+  });
+}
+
+/**
  * A trolley or bus on the map: a badge in its line's color (a trolley drawn as one, a bus with its
  * route number), with an arrow for its heading and how long ago its position was taken.
  */
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+}
+
 function vehicleElement(v: LiveVehicle): HTMLElement {
   const el = document.createElement("div");
   el.className = `trolley ${v.mode}`;
@@ -1384,7 +1530,18 @@ function vehicleElement(v: LiveVehicle): HTMLElement {
     badge.innerHTML =
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2.5h6M12 2.5V5"/><rect x="5.5" y="5" width="13" height="13" rx="3"/><path d="M5.5 11.5h13"/><path d="M8.5 21l1.5-3M15.5 21L14 18"/></svg>';
   } else {
-    badge.textContent = v.route;
+    const label = escapeXml(v.route);
+    const font = label.length > 2 ? 8 : 10;
+    badge.innerHTML = `<svg width="44" height="30" viewBox="0 0 44 30" aria-hidden="true">
+      <rect x="1.5" y="3" width="41" height="18" rx="5" fill="currentColor"/>
+      <rect x="4" y="6" width="10" height="6" rx="1.2" fill="#fff"/>
+      <rect x="16.5" y="6" width="7" height="6" rx="1.2" fill="#fff" opacity="0.9"/>
+      <rect x="25.5" y="6" width="7" height="6" rx="1.2" fill="#fff" opacity="0.9"/>
+      <rect x="34.5" y="6" width="5" height="6" rx="1.2" fill="#fff" opacity="0.75"/>
+      <text x="22" y="17.5" text-anchor="middle" fill="#fff" font-size="${font}" font-weight="800" font-family="ui-sans-serif, system-ui, sans-serif">${label}</text>
+      <circle cx="12" cy="23.5" r="3.1" fill="#1c1c1c" stroke="#fff" stroke-width="1.2"/>
+      <circle cx="32" cy="23.5" r="3.1" fill="#1c1c1c" stroke="#fff" stroke-width="1.2"/>
+    </svg>`;
   }
   const age = document.createElement("span");
   age.className = "trolley-age";
@@ -1419,7 +1576,7 @@ function vehicleCard(v: LiveVehicle, trip: TripAhead | null): HTMLElement {
     const meta = document.createElement("span");
     meta.className = "place-popup-meta";
     const min = Math.round((next.at - Date.now()) / 60_000);
-    meta.textContent = `Next stop: ${next.name}, ${min <= 0 ? "due now" : `in ${min} min`} (MTS's estimate)`;
+    meta.textContent = `Next stop: ${next.name}, ${formatLead(min)} (MTS's estimate)`;
     el.append(meta);
   }
   return el;

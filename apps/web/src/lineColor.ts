@@ -25,28 +25,66 @@ function hash(s: string): number {
   return Math.abs(h);
 }
 
-/** Colour for a line's logo: official for trolleys and shuttles, a unique swatch per bus number. */
+/**
+ * The golden-angle step paints some route numbers the same colour even when they are not
+ * neighbours. 921 lands 6° from 201, so both were purple. These hues replace that result.
+ */
+const BUS_HUE: Record<string, number> = {
+  "921": 18,
+};
+
+/** Golden-angle hue so neighbouring route numbers (201 and 202) land far apart. */
+function busSwatch(short: string, spin = 0): string {
+  const n = Number(short);
+  const seed = Number.isFinite(n) && short.trim() !== "" ? n : hash(short);
+  const base = BUS_HUE[short] ?? (seed * 137.508) % 360;
+  const hue = (base + spin * 47) % 360;
+  return hslToHex(hue, 62, 36);
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const sat = s / 100;
+  const lig = l / 100;
+  const a = sat * Math.min(lig, 1 - lig);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const c = lig - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * c)
+      .toString(16)
+      .padStart(2, "0");
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+/**
+ * Colour for a line's logo. Trolleys and campus shuttles keep their published colour.
+ * Buses get a swatch per route number: MTS paints 201 and 202 (and most local buses) with one shared red or navy.
+ */
 export function lineColor(route: Pick<TransitRoute, "short" | "color" | "mode">): string {
   if (route.mode !== "bus") return route.color || "#4A6497";
   if (!route.short) return route.color || BUS_SWATCHES[0];
-  const official = (route.color || "").toLowerCase();
-  if (official && official !== "#000099") return route.color;
-  return BUS_SWATCHES[hash(route.short) % BUS_SWATCHES.length];
+  return busSwatch(route.short);
 }
 
-/** Up to three colours for a stop logo, one per line, never repeating a colour. */
-export function stopLogoColors(routes: Pick<TransitRoute, "short" | "color" | "mode">[]): string[] {
-  const colors: string[] = [];
+export interface LineBadge {
+  color: string;
+  /** Text on the square: "30", "201", "B". */
+  mark: string;
+  short: string;
+}
+
+/** One square per line at a stop, each with its own colour and route name. */
+export function lineBadges(routes: Pick<TransitRoute, "short" | "color" | "mode">[]): LineBadge[] {
   const used = new Set<string>();
+  const out: LineBadge[] = [];
   for (const r of routes) {
-    let c = lineColor(r);
-    if (used.has(c.toLowerCase())) c = BUS_SWATCHES[(hash(r.short || r.color) + used.size) % BUS_SWATCHES.length];
-    if (used.has(c.toLowerCase())) continue;
-    used.add(c.toLowerCase());
-    colors.push(c);
-    if (colors.length === 3) break;
+    let color = lineColor(r);
+    let spin = 0;
+    while (used.has(color.toLowerCase()) && spin < 6) color = busSwatch(r.short || r.color, ++spin);
+    used.add(color.toLowerCase());
+    out.push({ color, mark: lineMark(r), short: r.short });
   }
-  return colors.length ? colors : ["#4A6497"];
+  return out;
 }
 
 /** Short mark on a logo: "30", "IL", or "B" for the Blue Line. */

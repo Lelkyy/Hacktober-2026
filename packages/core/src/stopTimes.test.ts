@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CampusGraph } from "./graph.ts";
 import { EdgeKind, type GraphData } from "./types.ts";
 import { TransitNetwork, type TransitData } from "./transit.ts";
-import { arrivalsAtStop, linesAtStop, shapesAtStop } from "./stopTimes.ts";
+import { approachBearings, arrivalsAtStop, clusterSameNameStops, linesAtStop, routesPassing, shapesAtStop, sharedApproach, stopsOnLinesThrough } from "./stopTimes.ts";
 
 const tiny: GraphData = {
   version: 1,
@@ -68,6 +68,23 @@ describe("linesAtStop", () => {
   });
 });
 
+describe("routesPassing", () => {
+  it("picks the lines whose shape runs past an unscheduled stop", () => {
+    const lines = routesPassing(transit, [0, 0.03]);
+    expect(lines.map((l) => l.route.short).sort()).toEqual(["30", "41"]);
+  });
+
+  it("is empty far from every line", () => {
+    expect(routesPassing(transit, [5, 5])).toEqual([]);
+  });
+});
+
+describe("stopsOnLinesThrough", () => {
+  it("includes every stop on the lines that call here", () => {
+    expect(stopsOnLinesThrough(transit, ["a"]).sort()).toEqual(["a", "b"]);
+  });
+});
+
 describe("shapesAtStop", () => {
   it("returns each line's shape through the stop", () => {
     const shapes = shapesAtStop(transit, "a");
@@ -80,6 +97,80 @@ describe("shapesAtStop", () => {
 
   it("is empty for an unknown stop", () => {
     expect(shapesAtStop(transit, "nope")).toEqual([]);
+  });
+});
+
+describe("shapesAtStop opposite directions", () => {
+  it("keeps one shape when both ways of a line share the track", () => {
+    const bothWays: TransitData = {
+      ...data,
+      patterns: [
+        ...data.patterns,
+        {
+          route: 0,
+          headsign: "Old Town",
+          stops: [1, 0],
+          shape: [
+            [0, 0.06],
+            [0, 0],
+          ],
+          shapeIndex: [0, 1],
+          trips: [{ service: 0, times: [11 * 3600, 11 * 3600 + 600] }],
+        },
+      ],
+    };
+    const net = new TransitNetwork(bothWays, new CampusGraph(tiny));
+    const shapes = shapesAtStop(net, "a");
+    expect(shapes.filter((s) => s.route.short === "30")).toHaveLength(1);
+    expect(shapes.map((s) => s.route.short)).toEqual(["30", "41"]);
+  });
+});
+
+describe("approachBearings", () => {
+  it("is north for a northbound shape", () => {
+    const [heading] = approachBearings(transit, "a");
+    expect(heading).toBeCloseTo(0, 0);
+  });
+
+  it("hides the arrow when the two directions disagree", () => {
+    const bothWays: TransitData = {
+      ...data,
+      patterns: [
+        ...data.patterns,
+        {
+          route: 0,
+          headsign: "Old Town",
+          stops: [1, 0],
+          shape: [
+            [0, 0.06],
+            [0, 0],
+          ],
+          shapeIndex: [0, 1],
+          trips: [{ service: 0, times: [11 * 3600, 11 * 3600 + 600] }],
+        },
+      ],
+    };
+    const net = new TransitNetwork(bothWays, new CampusGraph(tiny));
+    expect(sharedApproach(approachBearings(net, "a"))).toBeNull();
+  });
+
+  it("keeps one heading when every line agrees", () => {
+    expect(sharedApproach([2, 8, 355])).toBeCloseTo(1.7, 0);
+    expect(sharedApproach([])).toBeNull();
+  });
+});
+
+describe("clusterSameNameStops", () => {
+  it("groups two platforms of the same station", () => {
+    const a = { id: "a", name: "UTC", lngLat: [-117.235, 32.877] as [number, number], node: 0 };
+    const b = { id: "b", name: "UTC", lngLat: [-117.2351, 32.8771] as [number, number], node: 0 };
+    const far = { id: "c", name: "UTC", lngLat: [-117.21, 32.86] as [number, number], node: 1 };
+    const other = { id: "d", name: "Nobel", lngLat: [-117.23505, 32.87705] as [number, number], node: 0 };
+    const groups = clusterSameNameStops([a, b, far, other]);
+    const utc = groups.filter((g) => g[0].name === "UTC");
+    expect(utc).toHaveLength(2);
+    expect(utc.find((g) => g.length === 2)?.map((s) => s.id).sort()).toEqual(["a", "b"]);
+    expect(utc.find((g) => g.length === 1)?.[0].id).toBe("c");
   });
 });
 
