@@ -42,7 +42,10 @@ import { BuildingSearch } from "./BuildingSearch.tsx";
 import { loadCampus, storage, type CampusData } from "./data.ts";
 import { Itinerary, formatDistance, formatTime } from "./Itinerary.tsx";
 import { PALETTE } from "./palette.ts";
+import { MapLayersMenu } from "./MapLayersMenu.tsx";
+import { SpinButton } from "./SpinButton.tsx";
 import { fetchSpinVehicles, fetchSpinZones, SPIN_REFRESH_MS } from "./spin.ts";
+import { LiveTransitButton } from "./LiveTransitButton.tsx";
 import { fetchLiveVehicles, MTS_LIVE, LIVE_REFRESH_MS } from "./mts.ts";
 import { MapView, type BaseMap, type CampusPlaces, type DayOverlay, type RouteLine } from "./MapView.tsx";
 import {
@@ -124,10 +127,23 @@ export function App() {
     return saved in MODES ? (saved as ModeId) : "walk";
   });
   const [myLocation, setMyLocationRaw] = useState<LngLat | null>(null);
-  /** Spin fleet, loaded only while a scooter trip is being planned. */
+  /** Spin e-bikes and scooters: shown while the Spin button is on, refreshed as often as the feed changes. */
+  const [spinOn, setSpinOn] = useState(false);
   const [spinBikes, setSpinBikes] = useState<SharedBike[] | null>(null);
-  /** Every live trolley and bus. Polled as soon as the app starts. */
+  const [spinLoading, setSpinLoading] = useState(false);
+  /** Live trolleys and buses: shown while their buttons are on, refreshed every ~20 s (one request for both). */
+  const [liveModes, setLiveModes] = useState<{ trolley: boolean; bus: boolean }>({ trolley: false, bus: false });
   const [live, setLive] = useState<{ vehicles: LiveVehicle[]; at: number } | null>(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const liveOn = liveModes.trolley || liveModes.bus;
+  const toggleLive = (mode: "trolley" | "bus") =>
+    MTS_LIVE
+      ? setLiveModes((m) => ({ ...m, [mode]: !m[mode] }))
+      : setHint("Live trolleys and buses need an MTS real-time API key: request one at sdmts.com, then set VITE_MTS_KEY in apps/web/.env.local.");
+  const shownLive = useMemo(
+    () => (live ? { at: live.at, vehicles: live.vehicles.filter((v) => liveModes[v.mode]) } : null),
+    [live, liveModes],
+  );
   // Small GPS jitter would re-plan everything that starts from your location; move the dot every ~10 m.
   const setMyLocation = useCallback(
     (p: LngLat) => setMyLocationRaw((cur) => (cur && haversine(cur[0], cur[1], p[0], p[1]) < 10 ? cur : p)),
@@ -191,9 +207,9 @@ export function App() {
   /** Phones: the panel is a bottom sheet that can be pulled up. */
   const [sheetOpen, setSheetOpen] = useState(false);
   // Campus or illustrated (anything saved from before those were the only two is campus).
-  const [baseMap] = useState<BaseMap>(() => (storage.get<string>("campus-nav:base-map", "campus") === "illustrated" ? "illustrated" : "campus"));
+  const [baseMap, setBaseMap] = useState<BaseMap>(() => (storage.get<string>("campus-nav:base-map", "campus") === "illustrated" ? "illustrated" : "campus"));
   useEffect(() => storage.set("campus-nav:base-map", baseMap), [baseMap]);
-  const [placeCategories] = useState<string[]>(() => storage.get<string[]>("campus-nav:place-categories", []));
+  const [placeCategories, setPlaceCategories] = useState<string[]>(() => storage.get<string[]>("campus-nav:place-categories", []));
   useEffect(() => storage.set("campus-nav:place-categories", placeCategories), [placeCategories]);
   // UCSD's places (restrooms, food, water...), fetched when first shown.
   const [campusPlaces, setCampusPlaces] = useState<CampusPlaces | null>(null);
@@ -298,13 +314,14 @@ export function App() {
   );
 
   // Spin's fleet: while the Spin button is on, and while a trip is planned (for the scooter option).
-  const spinWanted = !!from && !!to;
+  const spinWanted = spinOn || (!!from && !!to);
   useEffect(() => {
     if (!spinWanted) {
       setSpinBikes(null);
       return;
     }
     let stopped = false;
+    let first = true;
     let busy = false;
     let lastLoad = 0;
     const load = () => {
@@ -312,16 +329,18 @@ export function App() {
       if (document.visibilityState === "hidden" || busy || Date.now() - lastLoad < SPIN_REFRESH_MS - 500) return;
       busy = true;
       lastLoad = Date.now();
+      setSpinLoading(true);
       fetchSpinVehicles()
         .then((bikes) => {
           if (stopped) return;
           setSpinBikes(bikes);
+          if (first && !bikes.length && spinOn) setHint("No Spin e-bikes or scooters are free to ride right now.");
+          first = false;
         })
-        .catch(() => {
-          /* scooter planning can continue without a fleet */
-        })
+        .catch(() => !stopped && first && spinOn && setHint("Couldn't load Spin vehicles. Try again in a moment."))
         .finally(() => {
           busy = false;
+          if (!stopped) setSpinLoading(false);
         });
     };
     load();
@@ -333,7 +352,7 @@ export function App() {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [spinWanted]);
+  }, [spinWanted, spinOn]);
   // Spin's zones (no riding, no parking, speed limits): loaded once, when first wanted.
   const [spinZones, setSpinZones] = useState<RideZone[] | null>(null);
   useEffect(() => {
@@ -369,8 +388,8 @@ export function App() {
   }, [data]);
   /** The rules on the map while scooters are chosen, or the Spin layer is on. */
   const scooterRules = useMemo(
-    () => (mode === "scooter" && from && to ? { zones: spinZones ?? [], noScooter: noScooterWalks, parking } : null),
-    [mode, from, to, spinZones, noScooterWalks, parking],
+    () => ((mode === "scooter" && from && to) || spinOn ? { zones: spinZones ?? [], noScooter: noScooterWalks, parking } : null),
+    [mode, from, to, spinOn, spinZones, noScooterWalks, parking],
   );
   const scooterPlan: Plan | null = scooterResult
     ? scooterResult.ok
@@ -412,8 +431,8 @@ export function App() {
 
 
   useEffect(() => {
-    if (!MTS_LIVE) {
-      setHint("Live trolleys and buses need an MTS real-time API key: set VITE_MTS_KEY in apps/web/.env.local.");
+    if (!liveOn) {
+      setLive(null);
       return;
     }
     let stopped = false;
@@ -428,18 +447,19 @@ export function App() {
       if (document.visibilityState === "hidden" || busy || Date.now() - lastLoad < LIVE_REFRESH_MS - 500) return;
       busy = true;
       lastLoad = Date.now();
+      setLiveLoading(true);
       fetchLiveVehicles(before)
         .then((t) => {
           if (stopped) return;
           before = new Map(t.vehicles.map((v) => [v.id, v]));
           setLive(t);
-          if (t.vehicles.length) setHint((cur) => (cur?.includes("Couldn't load live") ? null : cur));
-          else if (first) setHint("No trolleys or buses are running right now.");
+          if (first && !t.vehicles.length) setHint("No trolleys or buses are running right now.");
           first = false;
         })
         .catch(() => !stopped && first && setHint("Couldn't load live trolleys and buses from MTS. Try again in a moment."))
         .finally(() => {
           busy = false;
+          if (!stopped) setLiveLoading(false);
         });
     };
     load();
@@ -452,7 +472,7 @@ export function App() {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, []);
+  }, [liveOn]);
 
   /** "My location" as a trip start: pinned to the building you're in (or right beside), when you are. */
   const meAt = useCallback(
@@ -761,11 +781,10 @@ export function App() {
           baseMap={baseMap}
           places={campusPlaces}
           placeCategories={placeCategories}
-          spinBikes={null}
+          spinBikes={spinOn ? spinBikes : null}
           scooterRules={scooterRules}
           scooterTrip={mode === "scooter" && scooterTrip && !showingDay ? { scooter: scooterTrip.scooter.lngLat, parking: scooterTrip.parking } : null}
-          live={live}
-          transit={data.transit}
+          live={shownLive}
           onPlaceDirections={(p) => {
             setTab("go");
             setTo({ kind: "point", lngLat: p.lngLat, label: p.name });
@@ -784,6 +803,20 @@ export function App() {
           onLocate={setMyLocation}
         />
       )}
+
+      <div className="map-tools">
+        <MapLayersMenu
+          baseMap={baseMap}
+          onBaseMap={setBaseMap}
+          places={campusPlaces}
+          categories={placeCategories}
+          onCategories={setPlaceCategories}
+          nearYou={!!here}
+        />
+        <SpinButton on={spinOn} loading={spinLoading} onToggle={() => setSpinOn((v) => !v)} />
+        <LiveTransitButton mode="trolley" on={liveModes.trolley} loading={liveLoading && liveModes.trolley} onToggle={() => toggleLive("trolley")} />
+        <LiveTransitButton mode="bus" on={liveModes.bus} loading={liveLoading && liveModes.bus} onToggle={() => toggleLive("bus")} />
+      </div>
 
       <aside className={`sheet ${sheetOpen ? "open" : ""}`} aria-label="Directions and schedule">
         <button className="sheet-handle" aria-label={sheetOpen ? "Collapse panel" : "Expand panel"} onClick={() => setSheetOpen((v) => !v)}>
@@ -1022,7 +1055,6 @@ export function App() {
                   <button
                     className="primary start"
                     onClick={() => {
-                      setSheetOpen(true);
                       setNavigating(true);
                       setSheetOpen(false);
                     }}
