@@ -1,4 +1,4 @@
-import { formatFare, type Leg, type Route, type ScooterTrip, type TripFare } from "@campus/core";
+import { formatFare, type Leg, type Route, type ScooterTrip, type TransitStop, type TripFare } from "@campus/core";
 import { BikeIcon, BusIcon, ScooterIcon, TrolleyIcon, WalkIcon } from "./Icons.tsx";
 
 /** Door-to-door summary: total time, leave/arrive, and each walking, riding or shuttle leg. */
@@ -10,6 +10,7 @@ export function Itinerary({
   upass,
   onUpass,
   scooter,
+  onStopClick,
 }: {
   route: Route;
   destination: string;
@@ -20,6 +21,7 @@ export function Itinerary({
   onUpass?: (v: boolean) => void;
   /** A shared scooter trip: the scooter it rides. */
   scooter?: ScooterTrip | null;
+  onStopClick?: (stop: TransitStop) => void;
 }) {
   const showTimes = route.usesTransit || showLeave;
   const byBike = route.legs.some((l) => l.mode === "bike");
@@ -71,7 +73,7 @@ export function Itinerary({
       {route.legs.length > 1 && (
         <ol className="legs">
           {route.legs.map((leg, i) => (
-            <LegRow key={i} leg={leg} next={route.legs[i + 1]} destination={destination} scooter={scooter} />
+            <LegRow key={i} leg={leg} next={route.legs[i + 1]} destination={destination} scooter={scooter} onStopClick={onStopClick} />
           ))}
         </ol>
       )}
@@ -79,7 +81,19 @@ export function Itinerary({
   );
 }
 
-function LegRow({ leg, next, destination, scooter }: { leg: Leg; next?: Leg; destination: string; scooter?: ScooterTrip | null }) {
+function LegRow({
+  leg,
+  next,
+  destination,
+  scooter,
+  onStopClick,
+}: {
+  leg: Leg;
+  next?: Leg;
+  destination: string;
+  scooter?: ScooterTrip | null;
+  onStopClick?: (stop: TransitStop) => void;
+}) {
   if (leg.mode !== "bus") {
     const shared = leg.mode === "bike" && leg.parkAt !== undefined;
     const toScooter = next?.mode === "bike" && next.parkAt !== undefined;
@@ -96,16 +110,28 @@ function LegRow({ leg, next, destination, scooter }: { leg: Leg; next?: Leg; des
       </li>
     );
   }
+  const name = leg.route.mode === "trolley" ? `${leg.route.short} Line` : leg.route.short;
   return (
     <li className="leg bus" style={{ ["--route" as string]: leg.route.color }}>
       <span className="leg-icon">{leg.route.mode === "trolley" ? <TrolleyIcon /> : <BusIcon />}</span>
       <span>
+        <span className="leg-coming">
+          <span className="route-badge">{name}</span>
+          <span className="leg-coming-time">{formatTime(leg.departs)}</span>
+        </span>
         <span className="route-badge">{leg.route.mode === "trolley" ? `${leg.route.short} Line` : leg.route.short}</span>{" "}
         {leg.route.mode === "trolley" ? "Trolley" : leg.route.mode === "bus" ? "MTS bus" : leg.route.long}
         {leg.headsign && leg.headsign !== leg.route.long && <span className="muted"> toward {leg.headsign}</span>}
         <span className="leg-detail">
-          {formatTime(leg.departs)} at {leg.from.name} · {leg.stopCount} stop{leg.stopCount > 1 ? "s" : ""} · off at{" "}
-          {leg.to.name}, {formatTime(leg.arrives)}
+          {formatTime(leg.departs)} at{" "}
+          {onStopClick ? (
+            <button type="button" className="link stop-link-inline" onClick={() => onStopClick(leg.from)}>
+              {leg.from.name}
+            </button>
+          ) : (
+            leg.from.name
+          )}{" "}
+          · {leg.stopCount} stop{leg.stopCount > 1 ? "s" : ""} · off at {leg.to.name}, {formatTime(leg.arrives)}
         </span>
       </span>
     </li>

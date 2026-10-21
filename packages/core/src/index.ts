@@ -5,6 +5,8 @@ export * from "./route.ts";
 export * from "./schedule.ts";
 export * from "./plan.ts";
 export * from "./transit.ts";
+export * from "./stopTimes.ts";
+export * from "./lineOffset.ts";
 export * from "./sections.ts";
 export * from "./instructions.ts";
 export * from "./nav.ts";

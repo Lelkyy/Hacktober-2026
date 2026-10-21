@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alongPath, decodePolyline, decodeVehiclePositions, liveVehicles, measurePath, pathFrom, pointAlong, tripAhead, type LiveRoute } from "./liveTransit.ts";
+import { alongPath, decodePolyline, decodeVehiclePositions, liveVehicles, measurePath, pathFrom, pathUntil, pointAlong, tripAhead, type LiveRoute } from "./liveTransit.ts";
 
 /** A protobuf message from fields: [number, varint | string | float32 (as {f}) | nested fields]. */
 type Field = [number, number | string | { f: number } | Field[]];
@@ -123,10 +123,14 @@ describe("a vehicle's trip ahead", () => {
       path,
     );
     expect(ahead.stops.map((s) => s.name)).toEqual(["Stop C", "Stop D"]);
+    expect(ahead.passed.map((s) => s.name)).toEqual(["Stop A", "Stop B"]);
     expect(ahead.stops[0].at).toBe(day + (36120 + 120) * 1000);
     expect(ahead.path[0][1]).toBeCloseTo(150 / 111_195 * 1, 4);
     expect(ahead.path.at(-1)).toEqual([0, 0.003]);
     expect(ahead.path.length).toBe(3);
+    expect(ahead.behind[0]).toEqual([0, 0]);
+    expect(ahead.behind.at(-1)?.[1]).toBeCloseTo(150 / 111_195 * 1, 4);
+    expect(ahead.heading).toBeCloseTo(0, 0);
   });
 
   it("starts the path ahead at the vehicle's GPS fix, not where MTS reckons it has got to", () => {
@@ -153,7 +157,10 @@ describe("a vehicle's trip ahead", () => {
     const ahead = tripAhead(details, path, [0.00001, 0.0009]);
     expect(ahead.headsign).toBe("UTC");
     expect(ahead.path[0]).toEqual([0.00001, 0.0009]);
+    expect(ahead.behind.at(-1)).toEqual([0.00001, 0.0009]);
+    expect(ahead.behind[0]).toEqual([0, 0]);
     expect(ahead.stops.map((s) => s.name)).toEqual(["Stop 1", "Stop 2", "Stop 3"]);
+    expect(ahead.passed).toEqual([]);
   });
 });
 
@@ -187,6 +194,14 @@ describe("moving along a path", () => {
       [0.001, 0.001],
     ]);
     expect(pathFrom(path, 999)).toHaveLength(1);
+  });
+
+  it("gives the trail already covered, up to a point along the path", () => {
+    const trail = pathUntil(path, 55.6);
+    expect(trail[0]).toEqual([0, 0]);
+    expect(trail.at(-1)?.[1]).toBeCloseTo(0.0005, 5);
+    expect(pathUntil(path, 0)[0]).toEqual([0, 0]);
+    expect(pathUntil(path, 999).at(-1)).toEqual([0.001, 0.001]);
   });
 
   it("finds how far along the path a stop is, from a point on", () => {

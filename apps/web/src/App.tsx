@@ -29,6 +29,10 @@ import {
   type Route,
   type SharedBike,
   type LiveVehicle,
+  type TransitStop,
+  linesAtStop,
+  shapesAtStop,
+  spreadOverlappingLines,
   planScooterTrip,
   parkingSpots,
   scooterProfile,
@@ -45,9 +49,11 @@ import { PALETTE } from "./palette.ts";
 import { MapLayersMenu } from "./MapLayersMenu.tsx";
 import { SpinButton } from "./SpinButton.tsx";
 import { fetchSpinVehicles, fetchSpinZones, SPIN_REFRESH_MS } from "./spin.ts";
-import { LiveTransitButton } from "./LiveTransitButton.tsx";
+import { LiveTransitButton, StopsButton } from "./LiveTransitButton.tsx";
 import { fetchLiveVehicles, MTS_LIVE, LIVE_REFRESH_MS } from "./mts.ts";
 import { MapView, type BaseMap, type CampusPlaces, type DayOverlay, type RouteLine } from "./MapView.tsx";
+import { lineColor, lineMark, stopLogoColors } from "./lineColor.ts";
+import { StopPanel } from "./StopPanel.tsx";
 import {
   BikeIcon,
   BusIcon,
@@ -140,10 +146,9 @@ export function App() {
     MTS_LIVE
       ? setLiveModes((m) => ({ ...m, [mode]: !m[mode] }))
       : setHint("Live trolleys and buses need an MTS real-time API key: request one at sdmts.com, then set VITE_MTS_KEY in apps/web/.env.local.");
-  const shownLive = useMemo(
-    () => (live ? { at: live.at, vehicles: live.vehicles.filter((v) => liveModes[v.mode]) } : null),
-    [live, liveModes],
-  );
+  const [openStop, setOpenStop] = useState<TransitStop | null>(null);
+  const [showTransitStops, setShowTransitStops] = useState(() => storage.get("campus-nav:transit-stops", false));
+  useEffect(() => storage.set("campus-nav:transit-stops", showTransitStops), [showTransitStops]);
   // Small GPS jitter would re-plan everything that starts from your location; move the dot every ~10 m.
   const setMyLocation = useCallback(
     (p: LngLat) => setMyLocationRaw((cur) => (cur && haversine(cur[0], cur[1], p[0], p[1]) < 10 ? cur : p)),
@@ -419,6 +424,34 @@ export function App() {
     return bikePlan;
   }, [from, to, mode, busUnavailable, walkPlan, transitPlan, noStairsUnavailable, stepFreePlan, bikePlan, scooterUnavailable, scooterPlan]);
   const route = plan?.ok ? plan.route : null;
+  const routeLiveShorts = useMemo(() => {
+    const shorts = new Set<string>();
+    for (const l of route?.legs ?? []) {
+      if (l.mode === "bus" && l.route.feed === "mts" && l.route.short) shorts.add(l.route.short);
+    }
+    return [...shorts];
+  }, [route]);
+  const fetchLive = liveOn || (MTS_LIVE && routeLiveShorts.length > 0);
+  const shownLive = useMemo(() => {
+    if (!live) return null;
+    const vehicles = live.vehicles.filter((v) => liveModes[v.mode] || routeLiveShorts.includes(v.route));
+    return { at: live.at, vehicles };
+  }, [live, liveModes, routeLiveShorts]);
+  const logoStops = useMemo(() => {
+    if (!data) return [];
+    const stops = showTransitStops ? data.transit.data.stops : openStop ? [openStop] : [];
+    return stops.map((stop) => {
+      const lines = linesAtStop(data.transit, stop.id).map((x) => x.route);
+      return { stop, colors: stopLogoColors(lines), mark: lines.length === 1 ? lineMark(lines[0]) : undefined };
+    });
+  }, [data, showTransitStops, openStop]);
+  const stopRoutes = useMemo(() => {
+    if (!data || !openStop) return [];
+    const raw = shapesAtStop(data.transit, openStop.id);
+    const spread = spreadOverlappingLines(raw.map((s) => s.shape));
+    return raw.map((s, i) => ({ coordinates: spread[i], color: lineColor(s.route) }));
+  }, [data, openStop]);
+  useEffect(() => setOpenStop(null), [route]);
 
   // Walking: point out transit when it's clearly faster.
   const busSuggestion = useMemo(() => {
@@ -431,7 +464,7 @@ export function App() {
 
 
   useEffect(() => {
-    if (!liveOn) {
+    if (!fetchLive) {
       setLive(null);
       return;
     }
@@ -472,7 +505,7 @@ export function App() {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [liveOn]);
+  }, [fetchLive]);
 
   /** "My location" as a trip start: pinned to the building you're in (or right beside), when you are. */
   const meAt = useCallback(
@@ -586,11 +619,6 @@ export function App() {
 
   // The day view takes over the map: its walks and classes instead of the current route.
   const showingDay = tab === "schedule" && scheduleView === "day" && !!dayOverlay && !navigating;
-  // Only the stops the route gets on or off at; the rest of the network stays off the map.
-  const routeStops = useMemo(
-    () => [...new Map((route?.legs ?? []).flatMap((l) => (l.mode === "bus" ? [l.from, l.to] : [])).map((s) => [s.id, s])).values()],
-    [route],
-  );
   const routeLines: RouteLine[] | null =
     route && data
       ? route.legs.flatMap((l): RouteLine[] =>
@@ -772,8 +800,8 @@ export function App() {
           routeLines={showingDay ? null : routeLines}
           day={showingDay ? dayOverlay : null}
           connectors={plan?.ok && !showingDay ? plan.connectors : []}
-          stops={showingDay ? [] : routeStops}
-          showStops={!showingDay && routeStops.length > 0}
+          stops={[]}
+          showStops={false}
           from={from && !showingDay ? endpointPosition(from) : null}
           fromIsMe={fromIsMe && !showingDay}
           heading={heading}
@@ -785,6 +813,20 @@ export function App() {
           scooterRules={scooterRules}
           scooterTrip={mode === "scooter" && scooterTrip && !showingDay ? { scooter: scooterTrip.scooter.lngLat, parking: scooterTrip.parking } : null}
           live={shownLive}
+          logoStops={showingDay ? [] : logoStops}
+          stopRoutes={showingDay ? [] : stopRoutes}
+          onStopClick={(s) => {
+            if (openStop?.id === s.id) {
+              setOpenStop(null);
+              return;
+            }
+            setOpenStop(s);
+            setTab("go");
+            setSheetOpen(true);
+            setFocus({ at: s.lngLat, zoom: 17.2, key: Date.now() });
+          }}
+          onClearOverlay={() => setOpenStop(null)}
+          selectedStopId={openStop?.id ?? null}
           onPlaceDirections={(p) => {
             setTab("go");
             setTo({ kind: "point", lngLat: p.lngLat, label: p.name });
@@ -814,6 +856,15 @@ export function App() {
           nearYou={!!here}
         />
         <SpinButton on={spinOn} loading={spinLoading} onToggle={() => setSpinOn((v) => !v)} />
+        <StopsButton
+          on={showTransitStops}
+          onToggle={() =>
+            setShowTransitStops((v) => {
+              if (v) setOpenStop(null);
+              return !v;
+            })
+          }
+        />
         <LiveTransitButton mode="trolley" on={liveModes.trolley} loading={liveLoading && liveModes.trolley} onToggle={() => toggleLive("trolley")} />
         <LiveTransitButton mode="bus" on={liveModes.bus} loading={liveLoading && liveModes.bus} onToggle={() => toggleLive("bus")} />
       </div>
@@ -1041,7 +1092,8 @@ export function App() {
                   <button onClick={() => setMode("bus")}>Take it</button>
                 </div>
               )}
-              {route && to && (
+              {openStop && <StopPanel stop={openStop} transit={data.transit} onBack={() => setOpenStop(null)} />}
+              {route && to && !openStop && (
                 <>
                   <Itinerary
                     route={route}
@@ -1051,6 +1103,11 @@ export function App() {
                     upass={upass}
                     onUpass={setUpass}
                     scooter={mode === "scooter" ? scooterTrip : null}
+                    onStopClick={(s) => {
+                      setOpenStop(s);
+                      setSheetOpen(true);
+                      setFocus({ at: s.lngLat, zoom: 17.2, key: Date.now() });
+                    }}
                   />
                   <button
                     className="primary start"

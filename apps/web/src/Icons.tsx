@@ -127,6 +127,14 @@ export const TrolleyIcon = () => (
   </Icon>
 );
 
+export const StopIcon = () => (
+  <Icon>
+    <circle cx="12" cy="8.5" r="5" />
+    <path d="M12 13.5V21" />
+    <circle cx="12" cy="8.5" r="1.6" fill="currentColor" />
+  </Icon>
+);
+
 export const BuildingIcon = () => (
   <Icon width="18" height="18">
     <path d="M4 21V5.5L12 3l8 2.5V21" />

@@ -1,4 +1,4 @@
-import { BusIcon, TrolleyIcon } from "./Icons.tsx";
+import { BusIcon, StopIcon, TrolleyIcon } from "./Icons.tsx";
 
 /** A live-transit button on the map: shows (or hides) every MTS trolley, or every bus near campus, live. */
 export function LiveTransitButton({
@@ -22,6 +22,21 @@ export function LiveTransitButton({
       onClick={onToggle}
     >
       {mode === "trolley" ? <TrolleyIcon /> : <BusIcon />} {mode === "trolley" ? "Trolleys" : "Buses"}
+    </button>
+  );
+}
+
+/** Shows (or hides) public transport stops on the map. */
+export function StopsButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+  return (
+    <button
+      className={`map-chip live-chip ${on ? "on" : ""}`}
+      aria-pressed={on}
+      aria-label={on ? "Hide transit stops" : "Show transit stops"}
+      title={on ? "Hide transit stops" : "Show public transport stops"}
+      onClick={onToggle}
+    >
+      <StopIcon /> Stops
     </button>
   );
 }

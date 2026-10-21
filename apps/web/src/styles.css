@@ -341,6 +341,50 @@ button.link.danger { color: var(--danger); }
 .layers-place.on { border-color: var(--cat); background: color-mix(in srgb, var(--cat) 14%, var(--surface)); color: var(--text); }
 .layers-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--cat); box-shadow: 0 0 0 1.5px var(--surface); }
 .layers-source { margin: 0; }
+.layers-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 550;
+}
+.leg-coming { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.leg-coming-time { font-weight: 700; }
+.stop-link-inline { font-size: inherit; }
+.stop-badge {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
+  line-height: 0;
+}
+.stop-badge.on, .stop-mark.on .stop-badge { box-shadow: 0 0 0 3px var(--accent), 0 1px 4px rgba(0, 0, 0, 0.28); }
+.stop-mark {
+  padding: 0;
+  border: none;
+  background: none;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+}
+.stop-panel-head { display: flex; align-items: flex-start; gap: 12px; }
+.stop-panel-head h2 { margin: 0; font-size: 18px; line-height: 1.25; }
+.stop-lines { display: flex; flex-wrap: wrap; gap: 6px; }
+.stop-arrivals { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.stop-arrivals li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.stop-arrival-line { display: flex; flex-direction: column; gap: 1px; }
+.stop-arrival-in { font-size: 12px; font-weight: 650; color: var(--muted); white-space: nowrap; }
+.stop-arrival-in.late { color: var(--rose, #b4655b); }
 .place-popup .maplibregl-popup-content { padding: 10px 12px; border-radius: 12px; background: var(--surface); color: var(--text); font: 13px var(--font); box-shadow: var(--shadow); }
 .place-popup .maplibregl-popup-content > div { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding-right: 12px; }
 .place-popup .maplibregl-popup-tip { border-top-color: var(--surface); border-bottom-color: var(--surface); }

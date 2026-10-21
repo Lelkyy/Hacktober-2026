@@ -27,6 +27,7 @@ import {
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PALETTE } from "./palette.ts";
 import { formatDistance } from "./Itinerary.tsx";
+import { stopBadgeElement } from "./StopBadge.tsx";
 // MapLibre 6 derives its worker URL at runtime, which bundlers can't see; have Vite bundle it.
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import { useEffect, useRef, useState } from "react";
@@ -108,6 +109,14 @@ export interface MapViewProps {
   connectors: [LngLat, LngLat][];
   stops: TransitStop[];
   showStops: boolean;
+  /** Optional colour-coded stop logos (Stops button). Does not replace `stops`. */
+  logoStops?: { stop: TransitStop; colors: string[]; mark?: string }[];
+  onStopClick?: (stop: TransitStop) => void;
+  /** Lines through the selected stop (one per route / direction). */
+  stopRoutes?: { coordinates: LngLat[]; color: string }[];
+  /** Clicked away from a stop or live vehicle: hide that overlay. */
+  onClearOverlay?: () => void;
+  selectedStopId?: string | null;
   from: LngLat | null;
   to: LngLat | null;
   baseMap: BaseMap;
@@ -159,6 +168,12 @@ export function MapView(props: MapViewProps) {
   const lastTrip = useRef<string | null>(null);
   const popup = useRef<Popup | null>(null);
   const osmLayers = useRef<{ id: string; type: string }[]>([]);
+  /** The trolley or bus whose route is shown (its popup is open). */
+  const selected = useRef<string | null>(null);
+  /** The followed vehicle's route from its fix (its stops and MTS's times). */
+  const ahead = useRef<{ vehicle: LiveVehicle; trip: TripAhead } | null>(null);
+  /** Updates in a row the followed vehicle has been missing from. */
+  const missing = useRef(0);
 
   // Keep the latest callbacks without re-binding map listeners.
   const callbacks = useRef(props);
@@ -252,9 +267,9 @@ export function MapView(props: MapViewProps) {
           "line-blur": ["interpolate", ["exponential", 2], ["zoom"], 13, 3, 20, 384],
         },
       });
-      for (const layer of UCSD_LAYERS) map.addLayer({ ...layer, layout: { ...layer.layout, visibility: "none" } } as LayerSpecification);
+      for (const layer of UCSD_LAYERS) map.addLayer({ ...layer, layout: { ...layer.layout, visibility: "none" } } as unknown as LayerSpecification);
 
-      for (const id of ["route", "connectors", "stops", "doors", "day", "places", "spin", "vehicle-ahead", "scooter-rules", "scooter-trip"]) {
+      for (const id of ["route", "connectors", "stops", "doors", "day", "places", "spin", "vehicle-ahead", "stop-routes", "scooter-rules", "scooter-trip"]) {
         map.addSource(id, { type: "geojson", data: EMPTY });
       }
       // UCSD's places, under everything of the app's; names once zoomed in.
@@ -287,13 +302,35 @@ export function MapView(props: MapViewProps) {
         },
         paint: { "text-color": ["get", "color"], "text-halo-color": PALETTE.white, "text-halo-width": 1.5 },
       });
-      // A tapped trolley or bus: the rest of its route in its line's color, and its stops to come
-      // with how long until it gets there.
+      // A tapped trolley or bus: the trail it has already run (dashed), the rest of its route
+      // (solid, with arrows the way it's going), and its stops.
+      if (!map.hasImage("route-arrow")) map.addImage("route-arrow", routeArrowImage());
+      map.addLayer({
+        id: "vehicle-behind-casing",
+        type: "line",
+        source: "vehicle-ahead",
+        filter: ["==", ["get", "kind"], "behind"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": PALETTE.white, "line-width": ["interpolate", ["linear"], ["zoom"], 12, 4, 17, 8], "line-opacity": 0.55 },
+      });
+      map.addLayer({
+        id: "vehicle-behind",
+        type: "line",
+        source: "vehicle-ahead",
+        filter: ["==", ["get", "kind"], "behind"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": ["get", "color"],
+          "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2, 17, 4.5],
+          "line-opacity": 0.45,
+          "line-dasharray": [1.2, 1.4],
+        },
+      });
       map.addLayer({
         id: "vehicle-ahead-casing",
         type: "line",
         source: "vehicle-ahead",
-        filter: ["==", ["geometry-type"], "LineString"],
+        filter: ["==", ["get", "kind"], "ahead"],
         layout: { "line-cap": "round", "line-join": "round" },
         paint: { "line-color": PALETTE.white, "line-width": ["interpolate", ["linear"], ["zoom"], 12, 5, 17, 10], "line-opacity": 0.9 },
       });
@@ -301,15 +338,31 @@ export function MapView(props: MapViewProps) {
         id: "vehicle-ahead",
         type: "line",
         source: "vehicle-ahead",
-        filter: ["==", ["geometry-type"], "LineString"],
+        filter: ["==", ["get", "kind"], "ahead"],
         layout: { "line-cap": "round", "line-join": "round" },
         paint: { "line-color": ["get", "color"], "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2.5, 17, 6] },
+      });
+      map.addLayer({
+        id: "vehicle-ahead-arrows",
+        type: "symbol",
+        source: "vehicle-ahead",
+        filter: ["==", ["get", "kind"], "ahead"],
+        minzoom: 13,
+        layout: {
+          "symbol-placement": "line",
+          "symbol-spacing": 70,
+          "icon-image": "route-arrow",
+          "icon-size": ["interpolate", ["linear"], ["zoom"], 13, 0.45, 17, 0.7],
+          "icon-rotation-alignment": "map",
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
+        },
       });
       map.addLayer({
         id: "vehicle-ahead-stops",
         type: "circle",
         source: "vehicle-ahead",
-        filter: ["==", ["geometry-type"], "Point"],
+        filter: ["==", ["get", "kind"], "stop"],
         paint: {
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 3, 17, 6],
           "circle-color": PALETTE.white,
@@ -318,10 +371,23 @@ export function MapView(props: MapViewProps) {
         },
       });
       map.addLayer({
+        id: "vehicle-passed-stops",
+        type: "circle",
+        source: "vehicle-ahead",
+        filter: ["==", ["get", "kind"], "passed"],
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 2, 17, 4],
+          "circle-color": ["get", "color"],
+          "circle-opacity": 0.35,
+          "circle-stroke-color": PALETTE.white,
+          "circle-stroke-width": 1.2,
+        },
+      });
+      map.addLayer({
         id: "vehicle-ahead-times",
         type: "symbol",
         source: "vehicle-ahead",
-        filter: ["==", ["geometry-type"], "Point"],
+        filter: ["==", ["get", "kind"], "stop"],
         layout: {
           "text-field": ["step", ["zoom"], ["get", "when"], 16, ["concat", ["get", "name"], "\n", ["get", "when"]]],
           "text-font": ["Noto Sans Regular"],
@@ -332,6 +398,35 @@ export function MapView(props: MapViewProps) {
           "text-optional": true,
         },
         paint: { "text-color": ["get", "color"], "text-halo-color": PALETTE.white, "text-halo-width": 1.6 },
+      });
+      map.addLayer({
+        id: "stop-routes-casing",
+        type: "line",
+        source: "stop-routes",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": PALETTE.white, "line-width": ["interpolate", ["linear"], ["zoom"], 12, 5, 17, 9], "line-opacity": 0.85 },
+      });
+      map.addLayer({
+        id: "stop-routes",
+        type: "line",
+        source: "stop-routes",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": ["get", "color"], "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2.5, 17, 5.5] },
+      });
+      map.addLayer({
+        id: "stop-routes-arrows",
+        type: "symbol",
+        source: "stop-routes",
+        minzoom: 13,
+        layout: {
+          "symbol-placement": "line",
+          "symbol-spacing": 70,
+          "icon-image": "route-arrow",
+          "icon-size": ["interpolate", ["linear"], ["zoom"], 13, 0.45, 17, 0.7],
+          "icon-rotation-alignment": "map",
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
+        },
       });
       // Spin vehicles in Spin orange: e-bikes solid and larger, scooters white with an orange ring;
       // the battery once zoomed in.
@@ -570,6 +665,10 @@ export function MapView(props: MapViewProps) {
       ];
       const bike = map.getLayer("spin") ? map.queryRenderedFeatures(box, { layers: ["spin"] })[0] : undefined;
       if (bike && bike.geometry.type === "Point") {
+        selected.current = null;
+        ahead.current = null;
+        if (map.getSource("vehicle-ahead")) source(map, "vehicle-ahead").setData(EMPTY);
+        callbacks.current.onClearOverlay?.();
         const at = bike.geometry.coordinates as LngLat;
         popup.current?.remove();
         popup.current = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup" })
@@ -589,6 +688,10 @@ export function MapView(props: MapViewProps) {
           ], { layers: ["places"] })[0]
         : undefined;
       if (hit && hit.geometry.type === "Point") {
+        selected.current = null;
+        ahead.current = null;
+        if (map.getSource("vehicle-ahead")) source(map, "vehicle-ahead").setData(EMPTY);
+        callbacks.current.onClearOverlay?.();
         const at = hit.geometry.coordinates as LngLat;
         const { name, kind, building } = hit.properties as { name: string; kind: string; building: string };
         popup.current?.remove();
@@ -599,6 +702,15 @@ export function MapView(props: MapViewProps) {
             callbacks.current.onPlaceDirections({ lngLat: at, name });
           }))
           .addTo(map);
+        return;
+      }
+      // Clicking the empty map hides the selected stop or bus route (without dropping a pin).
+      if (selected.current || callbacks.current.selectedStopId) {
+        selected.current = null;
+        ahead.current = null;
+        popup.current?.remove();
+        if (map.getSource("vehicle-ahead")) source(map, "vehicle-ahead").setData(EMPTY);
+        callbacks.current.onClearOverlay?.();
         return;
       }
       callbacks.current.onMapClick([e.lngLat.lng, e.lngLat.lat]);
@@ -691,8 +803,13 @@ export function MapView(props: MapViewProps) {
         el.addEventListener("click", (e) => {
           e.stopPropagation();
           const { vehicle } = markers.get(v.id)!;
-          popup.current?.remove();
+          const same = selected.current === vehicle.id;
+          callbacks.current.onClearOverlay?.();
+          selected.current = null;
           ahead.current = null;
+          popup.current?.remove();
+          showAhead(null);
+          if (same) return;
           const card = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup", offset: 18 })
             .setLngLat(vehicle.lngLat)
             .setDOMContent(vehicleCard(vehicle, null))
@@ -715,8 +832,9 @@ export function MapView(props: MapViewProps) {
       const el = m.marker.getElement();
       el.style.setProperty("--line", v.color);
       el.title = v.mode === "bus" ? `Route ${v.line}` : v.line;
-      el.classList.toggle("has-heading", v.heading !== undefined);
-      el.dataset.heading = String(v.heading ?? 0);
+      const heading = v.heading ?? (v.id === selected.current ? ahead.current?.trip.heading : undefined);
+      el.classList.toggle("has-heading", heading !== undefined);
+      el.dataset.heading = String(heading ?? 0);
     }
     turnArrows();
     showAges();
@@ -752,36 +870,38 @@ export function MapView(props: MapViewProps) {
     return () => clearInterval(timer);
   }, [props.live]);
 
-  /** The trolley or bus whose route ahead is shown (its popup is open). */
-  const selected = useRef<string | null>(null);
-  /** The followed vehicle's route ahead from its fix (its stops and MTS's times). */
-  const ahead = useRef<{ vehicle: LiveVehicle; trip: TripAhead } | null>(null);
-  /** Updates in a row the followed vehicle has been missing from. */
-  const missing = useRef(0);
   /** Show (or clear) a vehicle's route ahead, and what its card says about it. */
   const showAhead = (next: { vehicle: LiveVehicle; trip: TripAhead } | null) => {
     ahead.current = next;
     if (next && selected.current === next.vehicle.id) popup.current?.setDOMContent(vehicleCard(next.vehicle, next.trip));
     drawAhead();
   };
-  /** The route ahead: from the vehicle's fix to the end of its trip, with its stops still to come. */
+  /** The tapped vehicle's whole trip: the trail already run, the path still ahead, and its stops. */
   const drawAhead = () => {
     const map = mapRef.current;
     if (!map) return;
     const a = ahead.current;
     if (!a) return source(map, "vehicle-ahead").setData(EMPTY);
     const clock = Date.now();
+    const color = a.vehicle.color;
     source(map, "vehicle-ahead").setData({
       type: "FeatureCollection",
       features: [
-        ...(a.trip.path.length > 1 ? [{ ...lineFeature(a.trip.path), properties: { color: a.vehicle.color } }] : []),
+        ...(a.trip.behind.length > 1 ? [{ ...lineFeature(a.trip.behind), properties: { color, kind: "behind" } }] : []),
+        ...(a.trip.path.length > 1 ? [{ ...lineFeature(a.trip.path), properties: { color, kind: "ahead" } }] : []),
+        ...a.trip.passed.map((s) => ({
+          type: "Feature" as const,
+          properties: { color, name: s.name, kind: "passed" },
+          geometry: { type: "Point" as const, coordinates: s.lngLat },
+        })),
         ...a.trip.stops.map((s) => {
           const min = Math.round((s.at - clock) / 60_000);
           return {
             type: "Feature" as const,
             properties: {
-              color: a.vehicle.color,
+              color,
               name: s.name,
+              kind: "stop",
               when: min <= 0 ? "now" : min < 60 ? `${min} min` : new Date(s.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
             },
             geometry: { type: "Point" as const, coordinates: s.lngLat },
@@ -800,6 +920,25 @@ export function MapView(props: MapViewProps) {
       // Keep whatever's drawn; its next fix tries again.
     }
   };
+  // A selected stop takes the overlay: hide any bus/trolley route still drawn.
+  useEffect(() => {
+    if (!props.selectedStopId || !selected.current) return;
+    selected.current = null;
+    popup.current?.remove();
+    showAhead(null);
+  }, [props.selectedStopId]);
+  useEffect(() => {
+    if (!ready) return;
+    const map = mapRef.current!;
+    if (!map.getSource("stop-routes")) return;
+    const routes = props.stopRoutes ?? [];
+    source(map, "stop-routes").setData({
+      type: "FeatureCollection",
+      features: routes
+        .filter((r) => r.coordinates.length > 1)
+        .map((r) => ({ ...lineFeature(r.coordinates), properties: { color: r.color } })),
+    });
+  }, [ready, props.stopRoutes]);
   // Arrows point the way on the map: allow for the map being rotated.
   const turnArrows = () => {
     const bearing = mapRef.current?.getBearing() ?? 0;
@@ -910,6 +1049,31 @@ export function MapView(props: MapViewProps) {
       })),
     });
   }, [ready, props.stops]);
+
+  const stopLogos = useRef(new Map<string, Marker>());
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const markers = stopLogos.current;
+    const shown = props.logoStops ?? [];
+    const keep = new Set(shown.map((s) => s.stop.id));
+    for (const [id, m] of markers) if (!keep.has(id)) (m.remove(), markers.delete(id));
+    for (const s of shown) {
+      markers.get(s.stop.id)?.remove();
+      const el = stopBadgeElement(s.colors, s.mark, s.stop.id === props.selectedStopId);
+      el.title = s.stop.name;
+      el.setAttribute("aria-label", s.stop.name);
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        callbacks.current.onStopClick?.(s.stop);
+      });
+      markers.set(s.stop.id, new Marker({ element: el, anchor: "center" }).setLngLat(s.stop.lngLat).addTo(map));
+    }
+    return () => {
+      for (const m of markers.values()) m.remove();
+      markers.clear();
+    };
+  }, [ready, props.logoStops, props.selectedStopId]);
 
   // The day view's walks and pins, framed whenever the day (or the choice of classes) changes.
   const lastDay = useRef("");
@@ -1090,39 +1254,11 @@ function lineFeature(coords: LngLat[]): GeoJSON.Feature<GeoJSON.LineString> {
 
 
 /**
- * From UCSD's campus vector style: the campus boundary and the district and
- * neighborhood names, as on the official ArcGIS campus map (fonts swapped for
- * ones the base map's font server has; names shown a little longer).
+ * From UCSD's campus vector style: district and neighborhood names, as on the
+ * official ArcGIS campus map (fonts swapped for ones the base map's font
+ * server has; names shown a little longer).
  */
 const UCSD_LAYERS = [
-  {
-    id: "ucsd-boundary-glow",
-    type: "line",
-    source: "ucsd",
-    "source-layer": "UCSD Boundary Campus Map",
-    minzoom: 13,
-    layout: { "line-cap": "round", "line-join": "round" },
-    paint: {
-      "line-color": "rgba(189,206,222,0.25)",
-      "line-width": { base: 1, stops: [[0, 2], [14, 5], [19, 8.3]] },
-      "line-offset": -2.1,
-      "line-translate": [0, 2],
-    },
-  },
-  {
-    id: "ucsd-boundary",
-    type: "line",
-    source: "ucsd",
-    "source-layer": "UCSD Boundary Campus Map",
-    minzoom: 13,
-    layout: { "line-cap": "round", "line-join": "round" },
-    paint: {
-      "line-color": "rgba(75,117,166,0.73)",
-      "line-width": { base: 1, stops: [[0, 1], [14, 2], [19, 4]] },
-      "line-dasharray": [2, 2],
-      "line-offset": -2.1,
-    },
-  },
   {
     id: "ucsd-subdistricts",
     type: "symbol",
@@ -1196,7 +1332,7 @@ function showsUnderDrawing(id: string, type: string): boolean {
 /**
  * UCSD's ground-level campus drawing ("Ground Level Basemap" in its vector
  * tiles, by `_symbol`), in the app's colors: sage lawns, cream walkways, warm
- * gray buildings with a darker edge, clay for the track.
+ * gray buildings, clay for the track.
  */
 const GROUND_COLORS: [number[], string][] = [
   [[3], "#d3cdbd"], // buildings
@@ -1222,21 +1358,12 @@ const UCSD_GROUND: LayerSpecification[] = [
     },
   },
   {
-    id: "ucsd-ground-buildings-edge",
-    type: "line",
-    source: "ucsd",
-    "source-layer": "Ground Level Basemap",
-    filter: ["==", ["get", "_symbol"], 3],
-    layout: { visibility: "none", "line-join": "round" },
-    paint: { "line-color": "#9a927e", "line-width": ["interpolate", ["linear"], ["zoom"], 13, 0.3, 15, 0.6, 18, 1.4] },
-  },
-  {
     id: "ucsd-construction",
     type: "fill",
     source: "ucsd",
     "source-layer": "Construction Buildings",
     layout: { visibility: "none" },
-    paint: { "fill-color": "#e6dfc6", "fill-outline-color": "#9a927e" },
+    paint: { "fill-color": "#e6dfc6" },
   },
 ];
 
@@ -1272,7 +1399,7 @@ function fixAge(ms: number, short = false): string {
   return s < 90 ? `${s} s ago` : `${Math.round(s / 60)} min ago`;
 }
 
-/** What a tapped trolley or bus says: its line, where it's going and its next stop (once its trip is loaded), and how old its position is. */
+/** What a tapped trolley or bus says: its line, the way it's going, its next stop, and how old its position is. */
 function vehicleCard(v: LiveVehicle, trip: TripAhead | null): HTMLElement {
   const el = document.createElement("div");
   const title = document.createElement("strong");
@@ -1281,6 +1408,12 @@ function vehicleCard(v: LiveVehicle, trip: TripAhead | null): HTMLElement {
   fix.className = "place-popup-meta vehicle-fix";
   fix.textContent = `GPS position from ${fixAge(Date.now() - v.fixAt)}`;
   el.append(title, fix);
+  if (trip?.headsign) {
+    const dir = document.createElement("span");
+    dir.className = "place-popup-meta";
+    dir.textContent = `Going toward ${trip.headsign}`;
+    el.append(dir);
+  }
   const next = trip?.stops[0];
   if (next) {
     const meta = document.createElement("span");
@@ -1290,6 +1423,28 @@ function vehicleCard(v: LiveVehicle, trip: TripAhead | null): HTMLElement {
     el.append(meta);
   }
   return el;
+}
+
+/** A small white chevron for arrows along a tapped vehicle's route (points along the line). */
+function routeArrowImage(): ImageData {
+  const size = 16;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  ctx.translate(size / 2, size / 2);
+  ctx.fillStyle = "#fff";
+  ctx.strokeStyle = "rgba(0,0,0,0.35)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(6, 0);
+  ctx.lineTo(-5, -4.5);
+  ctx.lineTo(-3, 0);
+  ctx.lineTo(-5, 4.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  return ctx.getImageData(0, 0, size, size);
 }
 
 /** The popup for a tapped place. */

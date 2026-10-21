@@ -186,11 +186,17 @@ export function decodePolyline(encoded: string): LngLat[] {
   return points;
 }
 
-/** The rest of a vehicle's trip: the path still ahead of it, and each stop to come with when it gets there. */
+/** A vehicle's trip: the path already covered, the path still ahead, and each stop. */
 export interface TripAhead {
   /** Where it's going ("UTC"). */
   headsign?: string;
+  /** From the vehicle's fix to the end of the trip. */
   path: LngLat[];
+  /** From the start of the trip up to the vehicle's fix (the trail it has already run). */
+  behind: LngLat[];
+  /** Compass heading of the path at the vehicle (0 = north). */
+  heading?: number;
+  /** Stops still to come, with MTS's times. */
   stops: {
     id: string;
     name: string;
@@ -200,6 +206,8 @@ export interface TripAhead {
     /** Meters along the trip's path. */
     along: number;
   }[];
+  /** Stops the vehicle has already passed. */
+  passed: { id: string; name: string; lngLat: LngLat; along: number }[];
 }
 
 interface ObaTripDetails {
@@ -230,16 +238,25 @@ export function tripAhead(details: ObaTripDetails, path: LngLat[], at?: LngLat):
   const reckoned = status?.distanceAlongTrip ?? 0;
   const along = at && path.length > 1 ? alongPath(measured, at, Math.max(0, reckoned - 2000)) : reckoned;
   const stopRefs = new Map((details.data?.references?.stops ?? []).map((s) => [s.id, s]));
-  const stops = (entry?.schedule?.stopTimes ?? [])
+  const times = entry?.schedule?.stopTimes ?? [];
+  const pin = (t: { stopId: string; distanceAlongTrip: number }) => {
+    const s = stopRefs.get(t.stopId);
+    return s ? { id: s.id, name: s.name, lngLat: [s.lon, s.lat] as LngLat, along: t.distanceAlongTrip } : null;
+  };
+  const stops = times
     .filter((t) => t.distanceAlongTrip > along)
     .flatMap((t) => {
-      const s = stopRefs.get(t.stopId);
-      return s ? [{ id: s.id, name: s.name, lngLat: [s.lon, s.lat] as LngLat, at: day + (t.arrivalTime + delay) * 1000, along: t.distanceAlongTrip }] : [];
+      const s = pin(t);
+      return s ? [{ ...s, at: day + (t.arrivalTime + delay) * 1000 }] : [];
     });
+  const passed = times.filter((t) => t.distanceAlongTrip <= along).flatMap((t) => pin(t) ?? []);
   const ahead = path.length > 1 ? pathFrom(measured, along) : [];
-  // Starting right at the vehicle.
+  const behind = path.length > 1 ? pathUntil(measured, along) : [];
+  // Starting / ending right at the vehicle.
   if (at && ahead.length) ahead[0] = at;
-  return { ...(headsign ? { headsign } : {}), path: ahead, stops };
+  if (at && behind.length) behind[behind.length - 1] = at;
+  const heading = path.length > 1 ? pointAlong(measured, along).heading : undefined;
+  return { ...(headsign ? { headsign } : {}), path: ahead, behind, ...(heading !== undefined ? { heading } : {}), stops, passed };
 }
 
 /** A path with the distance from its start to each point, for finding a point a distance along it. */
@@ -283,6 +300,16 @@ export function pathFrom(path: MeasuredPath, meters: number): LngLat[] {
   const start = pointAlong(path, meters).lngLat;
   const next = path.at.findIndex((d) => d > meters);
   return next === -1 ? [start] : [start, ...path.points.slice(next)];
+}
+
+/** The stretch of a path from the start up to `meters` along it (the trail already covered). */
+export function pathUntil(path: MeasuredPath, meters: number): LngLat[] {
+  if (path.points.length < 2) return path.points;
+  const end = pointAlong(path, meters).lngLat;
+  const last = path.at.findIndex((d) => d >= meters);
+  if (last === -1) return path.points;
+  const keep = path.points.slice(0, last);
+  return keep.length ? [...keep, end] : [end];
 }
 
 /**
