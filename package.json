@@ -7,7 +7,8 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "npm run dev -w @campus/web",
+    "dev": "npm run dev -w @campus/simple",
+    "dev:full": "npm run dev -w @campus/web",
     "build": "npm run build -w @campus/web",
     "build:graph": "tsx scripts/build-graph.ts",
     "fetch:osm": "tsx scripts/build-graph.ts --refresh",

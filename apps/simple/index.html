@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Triton Trails</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
+  </head>
+  <body>
+    <div id="map"></div>
+    <aside id="panel">
+      <h1>Triton Trails</h1>
+      <p id="status">Loading campus…</p>
+
+      <label>From <input id="from" placeholder="Geisel, WLH, CSE…" autocomplete="off" /></label>
+      <ul id="from-hits" class="hits" hidden></ul>
+      <label>To <input id="to" placeholder="Destination" autocomplete="off" /></label>
+      <ul id="to-hits" class="hits" hidden></ul>
+
+      <label>How
+        <select id="mode">
+          <option value="walk">Walk</option>
+          <option value="accessible">No stairs</option>
+          <option value="bike">Bike</option>
+          <option value="bus">Transit</option>
+        </select>
+      </label>
+      <p id="trip"></p>
+
+      <section id="stop" hidden>
+        <button id="stop-back" type="button">Back</button>
+        <h2 id="stop-name"></h2>
+        <div id="stop-lines"></div>
+        <ol id="stop-times"></ol>
+      </section>
+    </aside>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

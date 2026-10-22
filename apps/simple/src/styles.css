@@ -1,0 +1,37 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; font: 15px/1.4 system-ui, sans-serif; color: #17301b; }
+#map { position: absolute; inset: 0; }
+#panel {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  left: 12px;
+  width: min(340px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  padding: 14px;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.18);
+}
+h1 { margin: 0 0 6px; font-size: 18px; }
+h2 { margin: 8px 0; font-size: 16px; }
+label { display: block; margin-top: 8px; font-size: 12px; }
+input, select, button { font: inherit; }
+input, select { width: 100%; margin-top: 2px; padding: 7px 8px; }
+button { margin-top: 8px; }
+#status, #trip { font-size: 13px; color: #3d5340; }
+.hits { list-style: none; margin: 0; padding: 0; border: 1px solid #ddd; }
+.hits button { width: 100%; text-align: left; background: #fff; border: 0; border-bottom: 1px solid #eee; padding: 6px 8px; cursor: pointer; }
+.line {
+  display: inline-block;
+  margin: 2px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 2px solid var(--c, #333);
+  background: #fff;
+  cursor: pointer;
+}
+.line.on { background: var(--c, #333); color: #fff; }
+#stop-times { padding-left: 18px; }
+#stop-times li { margin: 4px 0; }
