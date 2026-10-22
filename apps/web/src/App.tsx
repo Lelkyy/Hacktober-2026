@@ -1,5 +1,6 @@
 import {
   CampusSearch,
+  campusMapPlaces,
   bearing,
   haversine,
   MODES,
@@ -614,7 +615,11 @@ export function App() {
     [data, saved.home, mode, planFor, transitFor],
   );
 
-  const allPlaces = useMemo(() => [...saved.places, ...(data?.places.places ?? [])], [saved.places, data]);
+  // Saved places, student names and stops, then food, courts and pools from the campus map and dining lists.
+  const allPlaces = useMemo(
+    () => [...saved.places, ...(data?.places.places ?? []), ...campusMapPlaces(campusPlaces)],
+    [saved.places, data, campusPlaces],
+  );
   const placeById = useMemo(() => new Map(allPlaces.map((p) => [p.id, p])), [allPlaces]);
   const campusSearch = useMemo(
     () => (data ? new CampusSearch({ buildings: data.buildings, places: allPlaces, courses: data.sections?.courses, indoor }) : null),

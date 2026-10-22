@@ -122,7 +122,8 @@ export interface Place {
   aliases: string[];
   /** One or more spots; a route goes to whichever is closest. */
   points: LngLat[];
-  kind: "lingo" | "stop" | "saved";
+  /** "campus": from UCSD's campus map or dining lists (food, courts, pools); `note` says what it is. */
+  kind: "lingo" | "stop" | "saved" | "campus";
   note?: string;
 }
 
