@@ -14,6 +14,7 @@ export * from "./indoor.ts";
 export * from "./fares.ts";
 export * from "./transitOptions.ts";
 export * from "./campusSearch.ts";
+export * from "./campusPlaces.ts";
 export * from "./gbfs.ts";
 export * from "./liveTransit.ts";
 export * from "./warp.ts";

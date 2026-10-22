@@ -140,6 +140,22 @@ export class CampusSearch {
     const courseLike = !!course;
     if (course) for (const h of this.courseHits(q, course)) add(h);
 
+    // Your saved places and student names rank above stops with similar names.
+    const boostDocument = (id: string) => ({ saved: 1.5, lingo: 1.3, campus: 1.3, stop: 1 })[this.placeById.get(id)!.kind];
+    const placeHits = merge(
+      this.places.search(q, { ...searchOptions(q), boostDocument }),
+      this.places.search(squash(q), { ...searchOptions(squash(q)), fields: ["squashed"], boostDocument }),
+    ).slice(0, 6);
+    if (!placeHits.length && q.includes(" "))
+      placeHits.push(...this.places.search(q, { ...searchOptions(q), combineWith: "OR", boostDocument }).slice(0, 3));
+    // A place's whole name, typed out, before a room guessed from it ("360 at Canyon Vista Marketplace" is the
+    // station, not room 360 in the Canyon Vista Administration building).
+    const exactPlace = placeHits.filter((r) => {
+      const p = this.placeById.get(r.id)!;
+      return [p.name, ...p.aliases].some((n) => normalize(n) === normalize(q));
+    });
+    for (const r of exactPlace) add({ kind: "place", place: this.placeById.get(r.id)! });
+
     // Rooms: a building plus a room number, in either order, with or without a space.
     // Not for a course code ("CSE 11" is a course, not room 11 in the CSE building).
     if (!course || !("course" in course)) for (const h of this.roomHits(q)) add(h);
@@ -149,19 +165,6 @@ export class CampusSearch {
     const titleHits = courseLike ? [] : this.titleHits(q).slice(0, 2);
     const strongBuilding = this.buildings.search(q, { ...searchOptions(q), fuzzy: false }).length > 0;
     if (!strongBuilding) for (const h of titleHits) add(h);
-    // Your saved places and student names rank above stops with similar names.
-    const boostDocument = (id: string) => ({ saved: 1.5, lingo: 1.3, stop: 1 })[this.placeById.get(id)!.kind];
-    const placeHits = merge(
-      this.places.search(q, { ...searchOptions(q), boostDocument }),
-      this.places.search(squash(q), { ...searchOptions(squash(q)), fields: ["squashed"], boostDocument }),
-    ).slice(0, 6);
-    if (!placeHits.length && q.includes(" "))
-      placeHits.push(...this.places.search(q, { ...searchOptions(q), combineWith: "OR", boostDocument }).slice(0, 3));
-    const exactPlace = placeHits.filter((r) => {
-      const p = this.placeById.get(r.id)!;
-      return [p.name, ...p.aliases].some((n) => normalize(n) === normalize(q));
-    });
-    for (const r of exactPlace) add({ kind: "place", place: this.placeById.get(r.id)! });
     const [topBuilding, ...moreBuildings] = this.findBuildings(q, 8);
     if (topBuilding) add({ kind: "building", building: topBuilding });
     // Names students use ("Revelle bus stop") and your saved places, then the other buildings and stops.

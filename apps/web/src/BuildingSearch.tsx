@@ -39,7 +39,9 @@ interface Option {
   pick: () => void;
 }
 
-const PLACE_KIND: Record<Place["kind"], string> = { saved: "Saved place", lingo: "Student name", stop: "Shuttle stop" };
+const PLACE_KIND: Record<Place["kind"], string> = { saved: "Saved place", lingo: "Student name", stop: "Shuttle stop", campus: "Campus place" };
+/** What a place is: a campus map place says its own kind ("Dining Halls", "At Pines"). */
+const placeDetail = (p: Place) => (p.kind === "campus" && p.note ? p.note : PLACE_KIND[p.kind]);
 
 /**
  * The search box for a start or destination: classes ("CSE 11"), rooms in any
@@ -121,7 +123,7 @@ export function BuildingSearch({
       .map((r): Option | null => {
         if (r.kind === "place") {
           const p = placeById.get(r.id);
-          return p ? { key: `r-p-${p.id}`, icon: <ClockIcon />, title: p.name, detail: PLACE_KIND[p.kind], pick: toPlace(p) } : null;
+          return p ? { key: `r-p-${p.id}`, icon: <ClockIcon />, title: p.name, detail: placeDetail(p), pick: toPlace(p) } : null;
         }
         const b = buildingById.get(r.id);
         if (!b) return null;
@@ -185,7 +187,7 @@ export function BuildingSearch({
           pick: toBuilding(h.building),
         };
       case "place":
-        return { key: `p-${h.place.id}`, icon: h.place.id === HOME_ID ? <HomeIcon /> : <PinIcon />, title: h.place.name, detail: PLACE_KIND[h.place.kind], pick: toPlace(h.place) };
+        return { key: `p-${h.place.id}`, icon: h.place.id === HOME_ID ? <HomeIcon /> : <PinIcon />, title: h.place.name, detail: placeDetail(h.place), pick: toPlace(h.place) };
     }
   }
 
