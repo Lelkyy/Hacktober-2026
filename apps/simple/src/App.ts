@@ -33,8 +33,8 @@ export class App {
     this.map = new CampusMap(document.querySelector("#map")!, {
       onStop: (id) => this.openStop(id),
       onVehicle: (vehicle) => this.openVehicle(vehicle),
-    });
-    await this.map.showNetwork(this.campus.graph);
+      onEmpty: () => this.closeStop(),
+    }, this.campus.graph.data.bbox);
     await this.map.showTransit(this.campus.transit);
     this.root.status.textContent = "Campus loaded. Buses update every few seconds.";
     new LiveFeed(
@@ -80,7 +80,13 @@ export class App {
     const mode = (document.querySelector<HTMLSelectElement>("#mode")!.value || "walk") as ModeId;
     const planned = this.planner.plan(this.from, this.to, mode);
     this.root.trip.textContent = planned.note;
-    void this.map.showTrip(planned.route?.coordinates ?? []);
+    // The bus and trolley lines this trip rides: shown with the trip, hidden otherwise.
+    const { patterns } = this.campus.transit.data;
+    const lines = (planned.route?.legs ?? []).flatMap((leg) =>
+      leg.mode === "bus" ? [{ color: leg.route.color, route: patterns[leg.pattern]?.shape ?? [], ridden: leg.coordinates }] : [],
+    );
+    void this.map.showTrip(planned.route?.coordinates ?? [], lines);
+    this.map.fitTrip(planned.route?.coordinates ?? []);
   }
 
   private openStop(id: string): void {
@@ -129,6 +135,7 @@ export class App {
       if (!route || route.short !== vehicle.route || pattern.shape.length < 2) return [];
       return [{ color: vehicle.color, coordinates: pattern.shape }];
     });
+    this.root.stop.hidden = true;
     void this.map.showHighlight(shapes);
     this.root.trip.textContent = `${vehicle.mode === "trolley" ? vehicle.line : `Route ${vehicle.line}`} · last GPS ${age(vehicle.fixAt)}`;
     this.map.focus(vehicle.lngLat);

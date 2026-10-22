@@ -83,8 +83,8 @@ interface CodeFile {
 }
 const OUT_DIR = join(ROOT, "apps/web/public/data");
 
-/** [south, west, north, east] — main campus, Scripps, east campus health. */
-const BBOX = [32.86, -117.258, 32.893, -117.215] as const;
+/** [south, west, north, east] — main campus, Scripps, east campus health, and UTC (Westfield, its transit center and trolley station). */
+const BBOX = [32.86, -117.258, 32.893, -117.203] as const;
 
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",

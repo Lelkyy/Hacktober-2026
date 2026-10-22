@@ -1,25 +1,21 @@
-import { EdgeKind, type CampusGraph, type LiveVehicle, type LngLat, type TransitNetwork } from "@campus/core";
-import { Map as MlMap, NavigationControl, type GeoJSONSource } from "maplibre-gl";
+import { type LiveVehicle, type LngLat, type TransitNetwork } from "@campus/core";
+import { LngLatBounds, Map as MlMap, NavigationControl, type GeoJSONSource } from "maplibre-gl";
 import { settings } from "../settings.ts";
 
 const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
-const PATH_COLOR: Record<number, string> = {
-  [EdgeKind.Path]: "#2F5A2E",
-  [EdgeKind.Steps]: "#9C7058",
-  [EdgeKind.Bike]: "#1F6B4A",
-  [EdgeKind.Custom]: "#2F5A2E",
-  [EdgeKind.Road]: "#6E675C",
-  [EdgeKind.BikeOnly]: "#1F6B4A",
-  [EdgeKind.Shared]: "#3D8F62",
-  [EdgeKind.Sidewalk]: "#5D8A35",
-  [EdgeKind.Gap]: "#8AAF6A",
-  [EdgeKind.Lot]: "#8A8478",
-};
-
 export interface MapClicks {
   onStop: (stopId: string) => void;
   onVehicle: (vehicle: LiveVehicle) => void;
+  /** A click that hit neither a stop nor a vehicle. */
+  onEmpty: () => void;
+}
+
+/** A bus or trolley line the trip uses: its whole route, and the stretch you ride. */
+export interface JourneyLine {
+  color: string;
+  route: LngLat[];
+  ridden: LngLat[];
 }
 
 /**
@@ -31,12 +27,15 @@ export class CampusMap {
   private ready: Promise<void>;
   private vehicles: LiveVehicle[] = [];
 
-  constructor(container: HTMLElement, clicks: MapClicks) {
+  /** `bbox` is the campus data's [west, south, east, north]: the map can't pan far beyond it. */
+  constructor(container: HTMLElement, clicks: MapClicks, bbox: [number, number, number, number]) {
     this.map = new MlMap({
       container,
       style: "https://tiles.openfreemap.org/styles/liberty",
-      center: settings.center,
+      center: visibleCenter(settings.center, settings.zoom),
       zoom: settings.zoom,
+      minZoom: settings.minZoom,
+      maxBounds: campusBounds(bbox),
     });
     this.map.addControl(new NavigationControl(), "top-right");
     this.ready = new Promise((resolve) => this.map.on("load", () => {
@@ -44,55 +43,23 @@ export class CampusMap {
       resolve();
     }));
     this.map.on("click", (event) => {
-      const stop = this.map.queryRenderedFeatures(event.point, { layers: ["stops"] })[0];
-      if (stop?.properties?.id) {
-        clicks.onStop(String(stop.properties.id));
-        return;
-      }
+      // Vehicles first: they're drawn on top, often while waiting at a stop.
       const dot = this.map.queryRenderedFeatures(event.point, { layers: ["vehicles"] })[0];
       const vehicle = dot ? this.vehicles.find((v) => v.id === dot.properties?.id) : undefined;
-      if (vehicle) clicks.onVehicle(vehicle);
+      if (vehicle) {
+        clicks.onVehicle(vehicle);
+        return;
+      }
+      const stop = this.map.queryRenderedFeatures(event.point, { layers: ["stops"] })[0];
+      if (stop?.properties?.id) clicks.onStop(String(stop.properties.id));
+      else clicks.onEmpty();
     });
   }
 
-  async showNetwork(graph: CampusGraph): Promise<void> {
-    await this.ready;
-    const groups = new Map<number, LngLat[][]>();
-    for (let edge = 0; edge < graph.edgeCount; edge++) {
-      const kind = graph.edgeKind[edge];
-      const line: LngLat[] = [
-        [graph.lon[graph.edgeFrom[edge]], graph.lat[graph.edgeFrom[edge]]],
-        [graph.lon[graph.edgeTo[edge]], graph.lat[graph.edgeTo[edge]]],
-      ];
-      const list = groups.get(kind) ?? [];
-      list.push(line);
-      groups.set(kind, list);
-    }
-    this.source("network").setData({
-      type: "FeatureCollection",
-      features: [...groups].map(([kind, coordinates]) => ({
-        type: "Feature",
-        properties: { color: PATH_COLOR[kind] ?? "#2F5A2E" },
-        geometry: { type: "MultiLineString", coordinates },
-      })),
-    });
-  }
-
+  /** The stops. Lines aren't drawn until a trip uses them or a vehicle is clicked. */
   async showTransit(transit: TransitNetwork): Promise<void> {
     await this.ready;
-    const { routes, patterns, stops } = transit.data;
-    this.source("lines").setData({
-      type: "FeatureCollection",
-      features: patterns.flatMap((pattern) =>
-        pattern.shape.length > 1
-          ? [{
-              type: "Feature" as const,
-              properties: { color: routes[pattern.route]?.color ?? "#4A6497" },
-              geometry: { type: "LineString" as const, coordinates: pattern.shape },
-            }]
-          : [],
-      ),
-    });
+    const { stops } = transit.data;
     this.source("stops").setData({
       type: "FeatureCollection",
       features: stops.map((stop) => ({
@@ -116,7 +83,7 @@ export class CampusMap {
     });
   }
 
-  /** The line the user asked to see (a stop's routes, or the route they are planning). */
+  /** The lines the user asked to see: a clicked stop's or vehicle's routes. */
   async showHighlight(lines: { color: string; coordinates: LngLat[] }[]): Promise<void> {
     await this.ready;
     this.source("highlight").setData({
@@ -129,13 +96,36 @@ export class CampusMap {
     });
   }
 
-  async showTrip(coordinates: LngLat[]): Promise<void> {
+  /** The planned trip, and the bus and trolley lines it rides (whole route faint, the ridden part bold). */
+  async showTrip(coordinates: LngLat[], lines: JourneyLine[] = []): Promise<void> {
     await this.ready;
     this.source("trip").setData(
       coordinates.length > 1
         ? { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates } }] }
         : EMPTY,
     );
+    this.source("lines").setData({
+      type: "FeatureCollection",
+      features: lines.flatMap((l) =>
+        [
+          { coordinates: l.route, ridden: false },
+          { coordinates: l.ridden, ridden: true },
+        ]
+          .filter((part) => part.coordinates.length > 1)
+          .map((part) => ({
+            type: "Feature" as const,
+            properties: { color: l.color, ridden: part.ridden },
+            geometry: { type: "LineString" as const, coordinates: part.coordinates },
+          })),
+      ),
+    });
+  }
+
+  /** Move the map so the whole trip is in view beside the panel. */
+  fitTrip(coordinates: LngLat[]): void {
+    if (coordinates.length < 2) return;
+    const bounds = coordinates.reduce((b, p) => b.extend(p), new LngLatBounds(coordinates[0], coordinates[0]));
+    this.map.fitBounds(bounds, { padding: panelPadding(), maxZoom: 17.5, duration: 600 });
   }
 
   focus(at: LngLat): void {
@@ -147,20 +137,15 @@ export class CampusMap {
   }
 
   private addLayers(): void {
-    for (const id of ["network", "lines", "highlight", "trip", "stops", "vehicles"]) {
+    for (const id of ["lines", "highlight", "trip", "stops", "vehicles"]) {
       this.map.addSource(id, { type: "geojson", data: EMPTY });
     }
-    this.map.addLayer({
-      id: "network",
-      type: "line",
-      source: "network",
-      paint: { "line-color": ["get", "color"], "line-width": 2, "line-opacity": 0.85 },
-    });
     this.map.addLayer({
       id: "lines",
       type: "line",
       source: "lines",
-      paint: { "line-color": ["get", "color"], "line-width": 3, "line-opacity": 0.75 },
+      filter: ["!", ["get", "ridden"]],
+      paint: { "line-color": ["get", "color"], "line-width": 3, "line-opacity": 0.45 },
     });
     this.map.addLayer({
       id: "highlight",
@@ -175,9 +160,19 @@ export class CampusMap {
       paint: { "line-color": "#17301b", "line-width": 5 },
     });
     this.map.addLayer({
+      id: "lines-ridden",
+      type: "line",
+      source: "lines",
+      filter: ["get", "ridden"],
+      layout: { "line-cap": "round" },
+      paint: { "line-color": ["get", "color"], "line-width": 6 },
+    });
+    this.map.addLayer({
       id: "stops",
       type: "circle",
       source: "stops",
+      // Only once zoomed in past the starting view; zoomed out they cover the map.
+      minzoom: 16,
       paint: { "circle-radius": 5, "circle-color": "#fff", "circle-stroke-color": "#17301b", "circle-stroke-width": 2 },
     });
     this.map.addLayer({
@@ -194,4 +189,36 @@ export class CampusMap {
       paint: { "text-color": "#fff" },
     });
   }
+}
+
+/** Map space the panel covers, so "the middle" and the edges are where you can see them. */
+function panelPadding(): { top: number; right: number; bottom: number; left: number } {
+  if (window.innerWidth > 760) return { top: 60, right: 70, bottom: 60, left: 364 };
+  return { top: Math.round(window.innerHeight * 0.5), right: 40, bottom: 40, left: 40 };
+}
+
+function pxPerDegree(zoom: number): number {
+  return (256 * 2 ** zoom) / 360;
+}
+
+/** How far the map can pan: the campus with some room around it, and room for the panel at the widest zoom. */
+function campusBounds([w, s, e, n]: [number, number, number, number]): [[number, number], [number, number]] {
+  const pad = panelPadding();
+  const perDeg = pxPerDegree(settings.minZoom);
+  const cos = Math.cos((((s + n) / 2) * Math.PI) / 180);
+  const lon = (px: number) => px / perDeg;
+  const lat = (px: number) => (px * cos) / perDeg;
+  const room = settings.boundsPaddingDeg;
+  return [
+    [w - room - lon(pad.left), s - room - lat(pad.bottom)],
+    [e + room + lon(pad.right), n + room + lat(pad.top)],
+  ];
+}
+
+/** The map centre that puts `at` in the middle of the part of the map the panel doesn't cover. */
+function visibleCenter(at: LngLat, zoom: number): LngLat {
+  const pad = panelPadding();
+  const perDeg = pxPerDegree(zoom);
+  const cos = Math.cos((at[1] * Math.PI) / 180);
+  return [at[0] - (pad.left - pad.right) / 2 / perDeg, at[1] - ((pad.bottom - pad.top) / 2) * (cos / perDeg)];
 }

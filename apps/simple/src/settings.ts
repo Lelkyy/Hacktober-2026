@@ -7,7 +7,11 @@ export const settings = {
   livePollMs: 10_000,
   /** Leave empty to call MTS from the browser. Set this to your own server later, e.g. "/api/vehicles". */
   livePositionsUrl: "",
-  /** Campus map starts here. */
+  /** Campus map starts here (zoom and limits as in the full app, apps/web). */
   center: [-117.2376, 32.8801] as [number, number],
-  zoom: 15,
+  zoom: 15.6,
+  /** Campus and the coast on a laptop screen; no further out. */
+  minZoom: 13.5,
+  /** Room around the campus data's bounding box the map can pan to: enough to see the shore. */
+  boundsPaddingDeg: 0.006,
 };
