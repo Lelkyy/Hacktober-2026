@@ -360,32 +360,46 @@ button.link.danger { color: var(--danger); }
 .leg-coming { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .leg-coming-time { font-weight: 700; }
 .stop-link-inline { font-size: inherit; }
-.stop-logos {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-.stop-panel-head .stop-logos { flex-wrap: wrap; max-width: 220px; }
+/* Transit stop pins (StopBadge.tsx): white-edged round pin, line colours as a ring, a bus inside. */
 .stop-badge {
   position: relative;
-  display: inline-grid;
-  place-items: center;
+  display: inline-block;
   flex: none;
-  border-radius: 5px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
+  border-radius: 50%;
   line-height: 0;
+  filter: drop-shadow(0 1px 2px rgba(23, 48, 27, 0.35));
+}
+.stop-badge svg { display: block; width: 100%; height: 100%; }
+.stop-mark {
+  position: relative;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
   overflow: visible;
 }
-/* Arrow: the way a bus is facing as it arrives. Hidden when lines disagree. */
+.stop-mark .stop-badge { width: 100%; height: 100%; transition: transform 0.12s ease; }
+.stop-mark:hover, .stop-mark:focus-visible { z-index: 3; }
+.stop-mark:hover .stop-badge { transform: scale(1.12); }
+.stop-mark:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.stop-mark.on { z-index: 4; }
+.stop-mark.on .stop-badge { transform: scale(1.18); filter: drop-shadow(0 2px 4px rgba(23, 48, 27, 0.45)); }
+.stop-mark.on .stop-badge::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2.5px solid var(--accent);
+}
+/* Arrow on the pin's edge: the way buses face as they arrive. Hidden when lines disagree. */
 .stop-approach {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 56px;
-  height: 56px;
-  margin: -28px 0 0 -28px;
-  transform: rotate(var(--heading, 0deg));
+  width: calc(var(--size, 24px) + 14px);
+  height: calc(var(--size, 24px) + 14px);
+  transform: translate(-50%, -50%) rotate(var(--heading, 0deg));
   pointer-events: none;
 }
 .stop-approach::before {
@@ -394,21 +408,37 @@ button.link.danger { color: var(--danger); }
   left: 50%;
   top: 0;
   transform: translateX(-50%);
-  border-left: 8px solid transparent;
-  border-right: 8px solid transparent;
-  border-bottom: 13px solid var(--line, #243024);
-  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.45));
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 7px solid #1d2b22;
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff);
 }
-.stop-badge.on, .stop-mark.on .stop-badge { box-shadow: 0 0 0 3px var(--accent), 0 1px 4px rgba(0, 0, 0, 0.28); }
-.stop-mark {
-  padding: 0;
-  border: none;
-  background: none;
-  width: 28px;
-  height: 28px;
-  cursor: pointer;
-  overflow: visible;
+/* The lines' names beside the pin. */
+.stop-chips {
+  position: absolute;
+  left: calc(100% + 5px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1px 3px rgba(23, 48, 27, 0.3);
+  pointer-events: none;
+  white-space: nowrap;
 }
+.stop-chip {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 5px;
+  background: var(--chip, #4a6497);
+  color: #fff;
+  font: 750 10px/15px var(--font);
+  letter-spacing: 0.01em;
+  text-align: center;
+}
+.stop-chip.more { background: none; color: var(--muted); padding: 0 3px; }
 .stop-panel-head { display: flex; align-items: flex-start; gap: 12px; }
 .stop-panel-head h2 { margin: 0; font-size: 18px; line-height: 1.25; }
 .stop-lines { display: flex; flex-wrap: wrap; gap: 6px; }

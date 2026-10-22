@@ -125,6 +125,8 @@ function collapseOppositeDirections(shapes: StopRouteShape[]): StopRouteShape[] 
 /**
  * Upcoming scheduled departures at `stopId` after `from`, from today's timetable
  * (tomorrow's if nothing is left today). Uses the published GTFS times in transit.json.
+ * A trip's last stop isn't a departure: the bus ends its run there (a loop like the SIO Shuttle
+ * arrives back at Gilman Transit Center as it finishes), so it's left out.
  */
 export function arrivalsAtStop(transit: TransitNetwork, stopId: string, from = new Date(), limit = 12): StopArrival[] {
   const i = transit.data.stops.findIndex((s) => s.id === stopId);
@@ -138,6 +140,7 @@ export function arrivalsAtStop(transit: TransitNetwork, stopId: string, from = n
     const services = transit.activeServices(new Date(day.getTime() + 12 * 3600 * 1000));
     for (const { pattern, pos } of transit.stopPatterns[i]) {
       const pat = transit.data.patterns[pattern];
+      if (pos === pat.stops.length - 1) continue;
       const route = transit.data.routes[pat.route];
       for (const tr of pat.trips) {
         if (!services.has(tr.service)) continue;

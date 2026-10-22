@@ -68,12 +68,13 @@ export function lineColor(route: Pick<TransitRoute, "short" | "color" | "mode">)
 
 export interface LineBadge {
   color: string;
-  /** Text on the square: "30", "201", "B". */
+  /** The line's name on its chip: "30", "IL", "Blue". */
   mark: string;
   short: string;
+  mode: TransitRoute["mode"];
 }
 
-/** One square per line at a stop, each with its own colour and route name. */
+/** One badge per line at a stop, each with its own colour and route name. */
 export function lineBadges(routes: Pick<TransitRoute, "short" | "color" | "mode">[]): LineBadge[] {
   const used = new Set<string>();
   const out: LineBadge[] = [];
@@ -82,14 +83,14 @@ export function lineBadges(routes: Pick<TransitRoute, "short" | "color" | "mode"
     let spin = 0;
     while (used.has(color.toLowerCase()) && spin < 6) color = busSwatch(r.short || r.color, ++spin);
     used.add(color.toLowerCase());
-    out.push({ color, mark: lineMark(r), short: r.short });
+    out.push({ color, mark: lineMark(r), short: r.short, mode: r.mode });
   }
   return out;
 }
 
-/** Short mark on a logo: "30", "IL", or "B" for the Blue Line. */
+/** A line's name on its chip: "30", "IL", or "Blue" for the Blue Line ("MTG" for the MTG Event Line). */
 export function lineMark(route: Pick<TransitRoute, "short" | "mode">): string {
   if (!route.short) return "";
-  if (route.mode === "trolley") return route.short.slice(0, 1);
+  if (route.mode === "trolley") return route.short.split(" ")[0];
   return route.short;
 }

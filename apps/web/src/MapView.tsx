@@ -1088,14 +1088,16 @@ export function MapView(props: MapViewProps) {
     const keep = new Set(shown.map((s) => s.stop.id));
     for (const [id, m] of markers) if (!keep.has(id)) (m.remove(), markers.delete(id));
     const zoom = map.getZoom();
-    const size = zoom < 15 ? 20 : zoom < 16.5 ? 24 : 28;
+    const size = zoom < 15 ? 18 : zoom < 16.5 ? 22 : 26;
     const arrow = zoom >= 14.5;
-    // Selected stop last so its opened squares paint above anything stacked on the same point.
+    // Line names beside every stop once zoomed in close enough for them to fit.
+    const labels = zoom >= 16;
+    // Selected stop last so it and its chips paint above anything stacked on the same point.
     const ordered = [...shown].sort((a, b) => (a.stop.id === props.selectedStopId ? 1 : b.stop.id === props.selectedStopId ? -1 : 0));
     for (const s of ordered) {
       markers.get(s.stop.id)?.remove();
       const approach = arrow || s.stop.id === props.selectedStopId ? s.approach : undefined;
-      const el = stopBadgeElement(s.lines, s.stop.id === props.selectedStopId, approach, size);
+      const el = stopBadgeElement(s.lines, s.stop.id === props.selectedStopId, approach, size, labels);
       if (s.approach !== undefined) {
         const heading = `${s.approach - map.getBearing()}deg`;
         el.style.setProperty("--heading", heading);

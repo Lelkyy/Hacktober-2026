@@ -193,4 +193,32 @@ describe("arrivalsAtStop", () => {
   it("is empty when nothing runs that day", () => {
     expect(arrivalsAtStop(transit, "a", new Date(2026, 9, 10, 9, 0))).toEqual([]);
   });
+
+  it("leaves out buses ending their run at the stop", () => {
+    // Both lines end at B: nothing leaves from there.
+    expect(arrivalsAtStop(transit, "b", new Date(2026, 9, 7, 9, 55))).toEqual([]);
+  });
+
+  it("lists a loop's departures from its terminal, not its arrivals back", () => {
+    // Like the SIO Shuttle at Gilman Transit Center: runs leave A at :00 and :30 and are back at :15 and :45.
+    const loop: TransitData = {
+      ...data,
+      patterns: [
+        {
+          route: 0,
+          headsign: "Loop",
+          stops: [0, 1, 0],
+          shape: [[0, 0], [0, 0.06], [0, 0]],
+          shapeIndex: [0, 1, 2],
+          trips: [
+            { service: 0, times: [10 * 3600, 10 * 3600 + 450, 10 * 3600 + 900] },
+            { service: 0, times: [10.5 * 3600, 10.5 * 3600 + 450, 10.5 * 3600 + 900] },
+          ],
+        },
+      ],
+    };
+    const net = new TransitNetwork(loop, new CampusGraph(tiny));
+    const next = arrivalsAtStop(net, "a", new Date(2026, 9, 7, 10, 5));
+    expect(next.map((a) => [a.at.getHours(), a.at.getMinutes()])).toEqual([[10, 30]]);
+  });
 });
