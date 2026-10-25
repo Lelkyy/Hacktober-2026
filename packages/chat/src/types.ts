@@ -7,6 +7,7 @@ import type {
   SectionsData,
   TransitNetwork,
 } from "@campus/core";
+import type { ScrapedMenus } from "./menus.ts";
 
 /** The campus data the chat needs. Each app passes its own (the simple app's Campus, the full app's CampusData). */
 export interface ChatCampus {
@@ -22,11 +23,13 @@ export interface ChatCampus {
   indoor: IndoorData;
   /** Every point on UCSD's campus map: restrooms, water, food, printers, chargers… */
   mapPoints: CampusMapPoints | null;
+  /** Scraped HDH menus, when this app has them. Read when a food question is asked. */
+  menus?: ScrapedMenus | null;
 }
 
 /** Knobs each app sets. */
 export interface ChatSettings {
-  /** "auto": Gemma in LM Studio, else Chrome's built-in model, else Gemma through Ollama, else simple patterns. "off": patterns only. */
+  /** "auto": Gemma in LM Studio, else Ollama, else Chrome's built-in model, else simple patterns. "off": patterns only. */
   gemma: "auto" | "off";
   /** LM Studio model id (`lms ls`); any loaded "gemma…" model works too. */
   lmStudioModel: string;

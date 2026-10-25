@@ -77,7 +77,8 @@ import {
 } from "./Icons.tsx";
 import { InsideCard } from "./InsideCard.tsx";
 import { DiningMenu } from "./DiningMenu.tsx";
-import { findDining, type DiningMenus } from "./diningMenu.ts";
+import { FoodPanel } from "./FoodPanel.tsx";
+import { findDining, hallPinName, nameKey, type DiningMenus } from "./diningMenu.ts";
 import { NavigationView } from "./NavigationView.tsx";
 import { TimingControl, type TimingState } from "./TimingControl.tsx";
 import { TransitPanel } from "./TransitPanel.tsx";
@@ -95,12 +96,14 @@ const MODE_ICONS: Record<ModeId, () => JSX.Element> = { walk: WalkIcon, accessib
 /** Spin's orange, for scooter rides on the map. */
 const SPIN_COLOR = "#FF5A1F";
 
-type Tab = "go" | "report";
+type Tab = "go" | "food" | "report";
 
 export function App() {
   const [data, setData] = useState<CampusData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("go");
+  /** Hall expanded on the Food view, including one opened from a map pin. */
+  const [foodHall, setFoodHall] = useState<string | null>(null);
   const saved = useSavedPlaces();
   // The old Schedule tab's classes become the chat's, once: your lectures live in the chat now.
   useEffect(() => {
@@ -578,6 +581,8 @@ export function App() {
   // The chat bar: the campus as the chat sees it, your location, and what it does to the map.
   const campusPlacesRef = useRef(campusPlaces);
   campusPlacesRef.current = campusPlaces;
+  const menusRef = useRef(menus);
+  menusRef.current = menus;
   const liveRef = useRef(live);
   liveRef.current = live;
   const chatCampus = useMemo<ChatCampus | null>(
@@ -593,6 +598,9 @@ export function App() {
             // Fetched separately (and maybe later): read when asked.
             get mapPoints() {
               return campusPlacesRef.current;
+            },
+            get menus() {
+              return menusRef.current;
             },
           }
         : null,
@@ -614,6 +622,7 @@ export function App() {
       setTiming(trip.arriveBy ? { kind: "arrive", at: trip.arriveBy, label: trip.name } : { kind: "now" });
     },
     markers: (_points, category) => setPlaceCategories((on) => (on.includes(category) ? on : [...on, category])),
+    food: (hall) => setFoodHall(hall),
     stop: (ids, at) => {
       const stop = data?.transit.data.stops.find((s) => s.id === ids[0]);
       if (!stop) return;
@@ -638,6 +647,11 @@ export function App() {
     }
     return null;
   }, [menus, to]);
+  // A dining hall's menu and prices need room: open the panel when one appears (from the chat as well as a pin).
+  const diningHall = dining?.hall.name;
+  useEffect(() => {
+    if (diningHall) setSheetOpen(true);
+  }, [diningHall]);
   const inside = useMemo(
     () =>
       data && destBuilding && route
@@ -777,6 +791,29 @@ export function App() {
   };
 
 
+  /** Directions to a dining hall from the Food tab. */
+  const goToHall = (hallName: string) => {
+    const pin = nameKey(hallPinName(hallName));
+    const hallKey = nameKey(hallName);
+    const place = allPlaces.find(
+      (p) => nameKey(p.name) === pin || nameKey(p.name) === hallKey || p.aliases.some((a) => nameKey(a) === hallKey || nameKey(a) === pin),
+    );
+    if (place) {
+      setTo({ kind: "place", place });
+      setFocus({ at: place.points[0], zoom: 17.2, key: Date.now() });
+    } else {
+      const point = campusPlaces?.points.find((p) => nameKey(p[3]) === pin || nameKey(p[3]) === hallKey);
+      if (!point) return setHint(`Couldn't find ${hallName} on the map.`);
+      const at: LngLat = [point[0], point[1]];
+      setTo({ kind: "point", lngLat: at, label: hallName });
+      setFocus({ at, zoom: 17.2, key: Date.now() });
+    }
+    if (!from && myLocation) setFrom(meAt(myLocation));
+    setTab("go");
+    setSheetOpen(true);
+    setHint(null);
+  };
+
   /** Open the Report tab, optionally about the route on screen. */
   const openReport = (aboutRoute: boolean) => {
     setReportRoute(
@@ -837,10 +874,18 @@ export function App() {
           onClearOverlay={() => setOpenStop(null)}
           selectedStopId={openStop?.id ?? null}
           onPlaceDirections={(p) => {
+            const hit = menus ? findDining(menus, p.name) : null;
+            if (hit) {
+              setFoodHall(hit.hall.name);
+              setTab("food");
+              setSheetOpen(true);
+              setFocus({ at: p.lngLat, zoom: 17.2, key: Date.now() });
+              setHint(null);
+              return;
+            }
             setTab("go");
             setTo({ kind: "point", lngLat: p.lngLat, label: p.name });
             setHint(null);
-            if (menus && findDining(menus, p.name)) setSheetOpen(true);
           }}
           reportPin={tab === "report" ? reportPin : null}
           pickingSpot={tab === "report"}
@@ -866,6 +911,18 @@ export function App() {
             <img src="/logo-mark.png" alt="" className="brand-mark" width="26" height="32" />
             Triton Trails
           </h1>
+          {!navigating && (
+            <button
+              className={`food-tab ${tab === "food" ? "on" : ""}`}
+              aria-pressed={tab === "food"}
+              onClick={() => {
+                setTab(tab === "food" ? "go" : "food");
+                setSheetOpen(true);
+              }}
+            >
+              Food
+            </button>
+          )}
         </header>
 
         <div className="sheet-body">
@@ -1224,6 +1281,8 @@ export function App() {
                 </div>
               </details>
             </>
+          ) : tab === "food" ? (
+            <FoodPanel menus={menus} selected={foodHall} onSelect={setFoodHall} onDirections={goToHall} />
           ) : (
             <>
               <button className="link back-link" onClick={() => setTab("go")}>

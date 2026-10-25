@@ -10,6 +10,7 @@ export default defineConfig({
     proxy: {
       "/lmstudio": { target: "http://127.0.0.1:1234", rewrite: (path) => path.replace(/^\/lmstudio/, "") },
       "/ollama": { target: "http://127.0.0.1:11434", rewrite: (path) => path.replace(/^\/ollama/, "") },
+      "/hdh": { target: "https://hdh-web.ucsd.edu", changeOrigin: true, rewrite: (path) => path.replace(/^\/hdh/, "") },
     },
   },
 });

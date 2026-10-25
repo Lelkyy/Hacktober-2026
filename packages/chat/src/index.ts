@@ -8,3 +8,6 @@ export * from "./classes.ts";
 export * from "./nearby.ts";
 export * from "./stops.ts";
 export * from "./myClasses.ts";
+export * from "./memory.ts";
+export * from "./dining.ts";
+export * from "./menus.ts";

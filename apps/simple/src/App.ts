@@ -7,7 +7,7 @@ import { settings } from "./settings.ts";
 
 /**
  * Starts the pieces and connects them.
- * Read this file top to bottom: load campus, draw it, poll buses, find Gemma (LM Studio), then listen to the chat.
+ * Read this file top to bottom: load campus, draw it, poll buses, find Gemma (LM Studio or Ollama), then listen to the chat.
  */
 export class App {
   private campus!: Campus;

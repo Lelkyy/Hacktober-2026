@@ -18,7 +18,7 @@ export interface ChatHandle {
   run(label: string, work: (assistant: Assistant) => Reply | Promise<Reply>): void;
 }
 
-const EXAMPLES = ["What do I have today?", "Nearest restroom", "Next bus at Gilman"];
+const EXAMPLES = ["What's good under $10?", "Nearest restroom", "Next bus at Gilman"];
 
 /**
  * The chat bar under the map: say where you need to be ("I have MATH 20C in 30
@@ -69,6 +69,7 @@ export function ChatBar({
           trip: (trip) => latest.current.view.trip(trip),
           markers: (points, category) => latest.current.view.markers(points, category),
           stop: (ids, at) => latest.current.view.stop(ids, at),
+          food: (hall) => latest.current.view.food?.(hall),
         },
         settings: CHAT,
       });
