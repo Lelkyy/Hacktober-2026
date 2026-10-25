@@ -11,11 +11,10 @@ import {
   type Route,
   type SearchHit,
 } from "@campus/core";
-import type { Campus } from "../campus/loadCampus.ts";
-import { settings } from "../settings.ts";
-import type { TripPlanner } from "../trip/TripPlanner.ts";
+import type { ChatCampus, ChatSettings } from "./types.ts";
+import type { TripPlanner } from "./TripPlanner.ts";
 import { ClassFinder, clock, dayFor, describe, type ClassOption } from "./classes.ts";
-import type { Gemma } from "./Gemma.ts";
+import type { ChatModel } from "./ChatModel.ts";
 import type { Intent, TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
 import { nearbyKind, nearest } from "./nearby.ts";
@@ -28,13 +27,37 @@ export interface Reply {
   choices?: { label: string; pick: () => Promise<Reply> }[];
 }
 
+/** A trip the chat planned: enough for an app to plan and show it its own way. */
+export interface ChatTrip {
+  from: Endpoint;
+  to: Endpoint;
+  mode: TravelMode;
+  /** Be there by this (a class's start), if there's a time. */
+  arriveBy: Date | null;
+  /** "MATH 20C lecture, Mosaic 0114" */
+  title: string;
+  route: Route;
+}
+
 /** What the assistant shows on the map. */
-export interface MapView {
-  trip(route: Route | null): void;
-  /** Labelled dots: the nearest restrooms, say. */
-  markers(points: { lngLat: LngLat; label: string }[]): void;
+export interface ChatView {
+  /** A planned trip, or null to clear the last one. */
+  trip(trip: ChatTrip | null): void;
+  /** Labelled dots (the nearest restrooms, say), and the campus map category they're from. */
+  markers(points: { lngLat: LngLat; label: string }[], category: string): void;
   /** A stop's lines, and the map moved to it. */
   stop(ids: string[], at: LngLat): void;
+}
+
+export interface AssistantDeps {
+  campus: ChatCampus;
+  planner: TripPlanner;
+  model: ChatModel;
+  location: Location;
+  /** Live buses and trolleys right now (empty when the feed is off). */
+  vehicles: () => LiveVehicle[];
+  view: ChatView;
+  settings: Pick<ChatSettings, "arriveEarlyMin">;
 }
 
 interface Place {
@@ -64,6 +87,13 @@ const SAVED_SECTIONS_KEY = "chat.sections";
  */
 export class Assistant {
   private readonly classes: ClassFinder;
+  private readonly campus: ChatCampus;
+  private readonly planner: TripPlanner;
+  private readonly model: ChatModel;
+  private readonly location: Location;
+  private readonly vehicles: () => LiveVehicle[];
+  private readonly view: ChatView;
+  private readonly arriveEarlyMin: number;
   /** A start named for this request ("from Price Center"). Otherwise trips start where you are. */
   private from: Place | null = null;
   /** The last start named, for when there's no location: better than asking every time. */
@@ -74,20 +104,20 @@ export class Assistant {
   /** The last reply asked "where are you?": this runs once it's answered. */
   private pending: ((at: Place) => Promise<Reply>) | null = null;
 
-  constructor(
-    private readonly campus: Campus,
-    private readonly planner: TripPlanner,
-    private readonly gemma: Gemma,
-    private readonly location: Location,
-    private readonly vehicles: () => LiveVehicle[],
-    private readonly view: MapView,
-  ) {
-    this.classes = new ClassFinder(campus);
+  constructor(deps: AssistantDeps) {
+    this.campus = deps.campus;
+    this.planner = deps.planner;
+    this.model = deps.model;
+    this.location = deps.location;
+    this.vehicles = deps.vehicles;
+    this.view = deps.view;
+    this.arriveEarlyMin = deps.settings.arriveEarlyMin;
+    this.classes = new ClassFinder(this.campus);
   }
 
   async handle(message: string): Promise<Reply> {
-    const intent = await this.gemma.read(message, this.last);
-    console.info("[chat]", this.gemma.name, intent);
+    const intent = await this.model.read(message, this.last);
+    console.info("[chat]", this.model.name, intent);
     this.last = intent;
     if (intent.mode && intent.action !== "stop") this.mode = intent.mode;
 
@@ -231,7 +261,10 @@ export class Assistant {
     if (!center) return this.askWhere(`Where are you? I'll find the nearest ${kind.label}.`, () => this.nearby(what, near));
     const found = nearest(this.campus.mapPoints, kind, center, 3);
     if (!found.length) return { text: `The campus map has no ${kind.label}s.` };
-    this.view.markers(found.map((p) => ({ lngLat: p.lngLat, label: p.name })));
+    this.view.markers(
+      found.map((p) => ({ lngLat: p.lngLat, label: p.name })),
+      kind.category,
+    );
     const [best, ...others] = found;
     const name = (p: (typeof found)[number]) => `${p.name}${p.building && !p.name.includes(p.building) ? ` (${p.building})` : ""}`;
     this.trip = {
@@ -288,12 +321,12 @@ export class Assistant {
       return { text: `${trip.title}. ${planned.error}` };
     }
     const route = planned.route;
-    this.view.trip(route);
+    this.view.trip({ from: from.endpoint, to: trip.to.endpoint, mode: this.mode, arriveBy: trip.arriveBy, title: trip.title, route });
     const minutes = Math.ceil(planned.minutes);
     const how = planned.walkInstead ? "Walking is as fast as transit here" : MODES[this.mode].label;
     const lines = [
       `${trip.title}.`,
-      `${how} from ${from.label}: ${minutes} min, ${distance(route.meters)}. ${leaveAdvice(route, this.mode, minutes, trip.arriveBy)}`.trim(),
+      `${how} from ${from.label}: ${minutes} min, ${distance(route.meters)}. ${leaveAdvice(route, this.mode, minutes, trip.arriveBy, this.arriveEarlyMin)}`.trim(),
       ...this.transitLines(route),
       ...this.insideLines(trip.to.endpoint, route),
       ...(trip.notes ?? []),
@@ -368,7 +401,8 @@ export class Assistant {
   private async start(): Promise<Place | null> {
     if (this.from) return this.from;
     const at = await this.location.get();
-    if (at && this.location.onCampus(at)) return { endpoint: { kind: "point", lngLat: at, label: "Your location" }, label: "your location" };
+    // "My location": the label the full app follows your dot by.
+    if (at && this.location.onCampus(at)) return { endpoint: { kind: "point", lngLat: at, label: "My location" }, label: "your location" };
     return this.lastStart;
   }
 
@@ -378,11 +412,11 @@ export class Assistant {
   }
 }
 
-/** "Leave by 10:49 AM (in 17 min)." with the arrive-early margin from settings. */
-function leaveAdvice(route: Route, mode: TravelMode, minutes: number, arriveBy: Date | null): string {
+/** "Leave by 10:49 AM (in 17 min).", aiming to arrive `earlyMin` minutes before `arriveBy`. */
+function leaveAdvice(route: Route, mode: TravelMode, minutes: number, arriveBy: Date | null, earlyMin: number): string {
   if (!arriveBy) return "";
   const now = Date.now();
-  const early = settings.arriveEarlyMin * 60_000;
+  const early = earlyMin * 60_000;
   const leaveAt = mode === "bus" && route.leaveAt.getTime() > now ? route.leaveAt.getTime() : arriveBy.getTime() - early - minutes * 60_000;
   const wait = Math.floor((leaveAt - now) / 60_000);
   if (wait > 90) return `Leave by ${when(new Date(leaveAt))}.`;

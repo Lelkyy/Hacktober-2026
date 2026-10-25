@@ -14,9 +14,9 @@ export const settings = {
   minZoom: 13.5,
   /** Room around the campus data's bounding box the map can pan to: enough to see the shore. */
   boundsPaddingDeg: 0.006,
-  /** "auto": Chrome's built-in Gemma, else Ollama, else simple patterns. "off": patterns only (also ?gemma=off in the URL). */
+  /** "auto": Chrome's built-in AI, else Gemma through Ollama, else simple patterns. "off": patterns only (also ?gemma=off in the URL). */
   gemma: "auto" as "auto" | "off",
-  /** The Ollama model to use when Chrome has no built-in Gemma. Any "gemma…" model Ollama has works too. */
+  /** The Ollama model to use when Chrome has no built-in AI. Any "gemma…" model Ollama has works too. */
   ollamaModel: "gemma3:4b",
   /** Aim to reach class this many minutes before it starts. */
   arriveEarlyMin: 2,

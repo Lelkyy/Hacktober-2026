@@ -48,8 +48,10 @@ import {
   type ScooterTrip,
   BikeDir,
 } from "@campus/core";
-import { useCallback, useEffect, useMemo, useState, type JSX } from "react";
+import { Location, type ChatCampus, type ChatView } from "@campus/chat";
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 import { BuildingSearch } from "./BuildingSearch.tsx";
+import { ChatBar } from "./ChatBar.tsx";
 import { loadCampus, storage, type CampusData } from "./data.ts";
 import { Itinerary, formatDistance, formatTime } from "./Itinerary.tsx";
 import { PALETTE } from "./palette.ts";
@@ -625,6 +627,53 @@ export function App() {
     () => (data ? new CampusSearch({ buildings: data.buildings, places: allPlaces, courses: data.sections?.courses, indoor }) : null),
     [data, allPlaces, indoor],
   );
+  // The chat bar: the campus as the chat sees it, your location, and what it does to the map.
+  const campusPlacesRef = useRef(campusPlaces);
+  campusPlacesRef.current = campusPlaces;
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const chatCampus = useMemo<ChatCampus | null>(
+    () =>
+      data && campusSearch
+        ? {
+            graph: data.graph,
+            transit: data.transit,
+            search: campusSearch,
+            sections: data.sections,
+            buildingByCode: data.buildingByCode,
+            indoor: data.indoor,
+            // Fetched separately (and maybe later): read when asked.
+            get mapPoints() {
+              return campusPlacesRef.current;
+            },
+          }
+        : null,
+    // Once per load: a new search object (saved places) needn't restart the conversation.
+    [data],
+  );
+  const chatLocation = useMemo(() => (data ? new Location(data.graph.data.bbox, setMyLocation) : null), [data, setMyLocation]);
+  const chatView: ChatView = {
+    trip: (trip) => {
+      if (!trip) return;
+      setNavigating(false);
+      setOpenStop(null);
+      setTab("go");
+      setSelectedOption(0);
+      setMode(trip.mode);
+      setFromRaw(trip.from);
+      setToRaw(trip.to);
+      setTiming(trip.arriveBy ? { kind: "arrive", at: trip.arriveBy, label: trip.title } : { kind: "now" });
+    },
+    markers: (_points, category) => setPlaceCategories((on) => (on.includes(category) ? on : [...on, category])),
+    stop: (ids, at) => {
+      const stop = data?.transit.data.stops.find((s) => s.id === ids[0]);
+      if (!stop) return;
+      setOpenStop(stop);
+      setSheetOpen(true);
+      setFocus({ at, zoom: 17.2, key: Date.now() });
+    },
+  };
+
   const steps = useMemo(
     () => (data && route && to ? buildSteps(data.graph, route, endpointLabel(to), { leaving: from?.kind === "point" ? from.building : undefined }) : []),
     [data, route, to, from],
@@ -829,6 +878,7 @@ export function App() {
   if (loadError) return <div className="fatal">Couldn't load campus data. {loadError}</div>;
 
   return (
+    <div className="shell">
     <div
       className={`app ${navigating ? "navigating" : ""}`}
     >
@@ -1264,6 +1314,11 @@ export function App() {
           )}
         </footer>
       </aside>
+    </div>
+    {/* Hidden, not removed, while navigating: the conversation stays. */}
+    <div className="chatbar-slot" hidden={navigating}>
+      <ChatBar campus={chatCampus} location={chatLocation} vehicles={() => liveRef.current?.vehicles ?? []} view={chatView} />
+    </div>
     </div>
   );
 }

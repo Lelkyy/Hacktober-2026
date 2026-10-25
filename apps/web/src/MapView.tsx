@@ -708,8 +708,14 @@ export function MapView(props: MapViewProps) {
       map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
       map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
     }
+    // The chat bar under the map grows and shrinks with the conversation.
+    const resize = new ResizeObserver(() => map.resize());
+    resize.observe(container.current!);
 
-    return () => map.remove();
+    return () => {
+      resize.disconnect();
+      map.remove();
+    };
   }, []);
 
   useEffect(() => {
@@ -1284,7 +1290,9 @@ function visibleCenter(at: LngLat, zoom: number): LngLat {
 
 function fitPadding() {
   if (window.innerWidth > 760) return { top: 60, right: 70, bottom: 60, left: 440 };
-  return { top: 70, right: 40, bottom: Math.round(window.innerHeight * 0.5), left: 40 };
+  // The map's own height: the chat bar takes the bottom of the window.
+  const height = document.querySelector<HTMLElement>(".app")?.clientHeight ?? window.innerHeight;
+  return { top: 70, right: 40, bottom: Math.round(height * 0.5), left: 40 };
 }
 
 /** Your position: a dot with a cone for the way you face (shown once a heading is known). */

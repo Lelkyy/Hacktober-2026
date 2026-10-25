@@ -1,5 +1,5 @@
 import { MODES, planRoute, transitOptions, type Endpoint, type ModeId, type Route } from "@campus/core";
-import type { Campus } from "../campus/loadCampus.ts";
+import type { ChatCampus } from "./types.ts";
 
 export type Planned =
   | { ok: true; route: Route; minutes: number; /** Transit only: walking is as fast. */ walkInstead?: boolean }
@@ -7,7 +7,7 @@ export type Planned =
 
 /** Turns a start and an end into one route. The map just draws whatever this returns. */
 export class TripPlanner {
-  constructor(private readonly campus: Campus) {}
+  constructor(private readonly campus: ChatCampus) {}
 
   /** `arriveBy`: transit picks the buses that get there in time (walking and biking take the same time whenever). */
   plan(from: Endpoint, to: Endpoint, mode: ModeId, arriveBy?: Date): Planned {

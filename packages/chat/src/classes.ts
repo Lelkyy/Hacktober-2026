@@ -1,5 +1,5 @@
 import { courseKey, expandMeeting, WEEKDAYS, type Building, type CourseSections, type SectionMeeting } from "@campus/core";
-import type { Campus } from "../campus/loadCampus.ts";
+import type { ChatCampus } from "./types.ts";
 import type { Intent } from "./intent.ts";
 
 /** One room a class might be in, at one time. */
@@ -35,7 +35,7 @@ const TYPE_FOR: Record<NonNullable<Intent["meeting"]>, (m: SectionMeeting) => bo
 export class ClassFinder {
   private readonly byKey = new Map<string, CourseSections>();
 
-  constructor(private readonly campus: Campus) {
+  constructor(private readonly campus: ChatCampus) {
     for (const c of campus.sections?.courses ?? []) this.byKey.set(courseKey(c.code), c);
   }
 

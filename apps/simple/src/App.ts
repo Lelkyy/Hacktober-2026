@@ -1,12 +1,9 @@
 import { courseKey, shapesAtStops, type LiveVehicle, type LngLat, type Route } from "@campus/core";
+import { Assistant, ChatModel, groupOf, Location, stopSummary, TripPlanner, type Reply } from "@campus/chat";
 import { Campus } from "./campus/loadCampus.ts";
-import { Assistant, type Reply } from "./chat/Assistant.ts";
-import { Gemma } from "./chat/Gemma.ts";
-import { Location } from "./chat/Location.ts";
-import { groupOf, stopSummary } from "./chat/stops.ts";
 import { LiveFeed } from "./live/LiveFeed.ts";
 import { CampusMap } from "./map/CampusMap.ts";
-import { TripPlanner } from "./trip/TripPlanner.ts";
+import { settings } from "./settings.ts";
 
 /**
  * Starts the pieces and connects them.
@@ -47,12 +44,20 @@ export class App {
 
     const courses = new Set(this.campus.sections?.courses.map((c) => courseKey(c.code)));
     const isCourse = (code: string) => courses.has(courseKey(code));
-    const gemma = new Gemma(isCourse, (message) => (this.status.textContent = message));
-    await gemma.connect();
-    this.assistant = new Assistant(this.campus, new TripPlanner(this.campus), gemma, location, () => this.vehicles, {
-      trip: (route) => this.drawTrip(route),
-      markers: (points) => void this.map.showMarkers(points),
-      stop: (ids, at) => this.showStop(ids, at),
+    const model = new ChatModel(settings, isCourse, (message) => (this.status.textContent = message));
+    await model.connect();
+    this.assistant = new Assistant({
+      campus: this.campus,
+      planner: new TripPlanner(this.campus),
+      model,
+      location,
+      vehicles: () => this.vehicles,
+      view: {
+        trip: (trip) => this.drawTrip(trip?.route ?? null),
+        markers: (points) => void this.map.showMarkers(points),
+        stop: (ids, at) => this.showStop(ids, at),
+      },
+      settings,
     });
 
     const term = this.campus.sections?.term;
