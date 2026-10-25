@@ -97,6 +97,13 @@ export class Gemma {
       // A lasting detail's mode and start, when Gemma answered the trip but skipped them.
       if (!intent.from && fallback.from) intent.from = fallback.from;
       if (fallback.remember && !intent.mode && fallback.mode) intent.mode = fallback.mode;
+      // "2 bobas at Pines, how long and where" is an order even if the model reads "where" as a route.
+      if (fallback.action === "order") {
+        intent.action = "order";
+        intent.place = fallback.place ?? intent.place;
+        intent.item = fallback.item ?? intent.item;
+        intent.quantity = fallback.quantity ?? intent.quantity;
+      }
       // Gemma reads sentences better; the patterns know which course codes exist.
       if (intent.course && !this.isCourse(intent.course)) intent.course = fallback.course;
       if (!intent.course && fallback.course && intent.action !== "route") {

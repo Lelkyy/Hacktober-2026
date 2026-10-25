@@ -1,4 +1,5 @@
 import type { ModeId } from "@campus/core";
+import { hallNamed } from "./dining.ts";
 import { nearbyKind } from "./nearby.ts";
 
 /**
@@ -13,9 +14,10 @@ export interface Intent {
    * stop: when the next buses leave a stop ("next bus at Gilman").
    * next: their next class, from the sections they've picked.
    * change: change the last trip ("by bike instead", "I'm at Price Center").
+   * order: a Triton2Go price, wait, or quantity ("two boba at Pines").
    * other: anything else.
    */
-  action: "class" | "route" | "nearby" | "stop" | "next" | "change" | "other";
+  action: "class" | "route" | "nearby" | "stop" | "next" | "change" | "order" | "other";
   /** Course code as typed: "MATH 20C", "cse12". */
   course?: string;
   /** lecture, discussion, lab, midterm or final, when said. */
@@ -27,6 +29,10 @@ export interface Intent {
   /** Where they're starting, when said ("from Geisel", "I'm at Price Center"). */
   from?: string;
   mode?: TravelMode;
+  /** A dish, for "order": "matcha boba". */
+  item?: string;
+  /** How many of that dish. */
+  quantity?: number;
   /** "in 30 minutes" -> 30. */
   inMinutes?: number;
   /** "at 3pm" -> "15:00" (24h). */
@@ -50,7 +56,9 @@ export const TRAVEL_MODES: TravelMode[] = ["walk", "accessible", "bike", "bus"];
 export const INTENT_SCHEMA = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["class", "route", "nearby", "stop", "next", "change", "other"] },
+    action: { type: "string", enum: ["class", "route", "nearby", "stop", "next", "change", "order", "other"] },
+    item: { type: "string" },
+    quantity: { type: "number" },
     course: { type: "string" },
     meeting: { type: "string", enum: ["lecture", "discussion", "lab", "midterm", "final"] },
     place: { type: "string" },
@@ -81,7 +89,8 @@ Only copy what the message says; never invent rooms, buildings or times. Leave o
 - action "stop": they ask when buses or shuttles leave a stop. place = the stop (leave out for "near me").
 - action "next": they ask about their next class without naming it ("where's my next class").
 - action "change": they're changing the last trip without naming a new destination (a new mode, a new start, a new time).
-- action "other": anything else; put a one-sentence friendly reply in "reply" saying what you can do (directions to classes and campus places, the nearest restroom/water/food, bus times).
+- action "order": they ask what food costs, how long a Triton2Go order takes, or for a number of a dish. place = the dining hall ("Pines", "64 Degrees"). item = the dish. quantity = how many (default omitted).
+- action "other": anything else; put a one-sentence friendly reply in "reply" saying what you can do (directions to classes and campus places, the nearest restroom/water/food, bus times, Triton2Go prices).
 - from: where they start ("from Geisel", "I'm at Price Center" -> "Price Center").
 - mode: walk, accessible (no stairs, wheelchair), bike, bus (bus, shuttle, trolley, transit).
 - inMinutes: "in 30 minutes" -> 30, "in an hour" -> 60, "in half an hour" -> 30.
@@ -99,7 +108,8 @@ Examples:
 "actually I'll take the bus" -> {"action":"change","mode":"bus"}
 "I'm at the Warren Lecture Hall" -> {"action":"change","from":"Warren Lecture Hall"}
 "I usually bike and I live at Sixth College" -> {"action":"other","mode":"bike","from":"Sixth College","remember":["Usually bikes","Usually starts at Sixth College"],"reply":"I'll bike from Sixth College unless you say otherwise."}
-"I use a wheelchair" -> {"action":"other","mode":"accessible","remember":["Needs a step-free route"],"reply":"I'll keep your routes step-free."}`;
+"I use a wheelchair" -> {"action":"other","mode":"accessible","remember":["Needs a step-free route"],"reply":"I'll keep your routes step-free."}
+"two matcha boba at Pines, how much and how long" -> {"action":"order","place":"Pines","item":"matcha boba","quantity":2}`;
 }
 
 /** Make whatever came back safe to use: drop unknown fields and bad values. */
@@ -107,10 +117,12 @@ export function cleanIntent(raw: unknown): Intent | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const action = r.action;
-  if (typeof action !== "string" || !["class", "route", "nearby", "stop", "next", "change", "other"].includes(action)) return null;
+  if (typeof action !== "string" || !["class", "route", "nearby", "stop", "next", "change", "order", "other"].includes(action)) return null;
   const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
   const intent: Intent = { action: action as Intent["action"] };
   intent.course = text(r.course);
+  intent.item = text(r.item);
+  if (typeof r.quantity === "number" && r.quantity >= 1 && r.quantity <= 20) intent.quantity = Math.round(r.quantity);
   intent.place = text(r.place);
   intent.what = text(r.what)?.toLowerCase();
   intent.from = text(r.from);
@@ -205,8 +217,30 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
 
   const near = text.match(new RegExp(String.raw`\b(?:near|by|around|close to|next to)\s+(?:the\s+)?(.+?)${stopWords}`));
   const kind = /\b(nearest|closest|nearby|near|where can i|where's a|where is a|i need (?!to\b)|find (?:a|me)|any)\b/.test(text) ? nearbyKind(text) : undefined;
+  const ordering = /\b(how much|price|cost|costs|order|menu|triton2\s?go|waiting for release|ready now|working on it)\b/.test(text)
+    || (!!hallNamed(text) && /\b(how long|wait)\b/.test(text));
   if (intent.course) intent.action = "class";
-  else if (kind) {
+  else if (ordering) {
+    intent.action = "order";
+    const hall = hallNamed(intent.place ?? text) ?? hallNamed(text);
+    if (hall) intent.place = hall.name;
+    const qty = text.match(/\b(\d{1,2}|two|three|four|five)\b/);
+    const words: Record<string, number> = { two: 2, three: 3, four: 4, five: 5 };
+    if (qty) {
+      const n = words[qty[1]] ?? Number(qty[1]);
+      if (n >= 1 && n <= 20) intent.quantity = n;
+    }
+    if (!intent.item) {
+      let dish = text;
+      for (const word of ["how much", "how long", "is", "are", "a", "an", "the", "at", "for", "price", "cost", "costs", "order", "menu", "please", "i want", "two", "three", "four", "five"]) {
+        dish = dish.replace(new RegExp(`\\b${word}\\b`, "g"), " ");
+      }
+      if (hall) for (const alias of [hall.name, hall.place, ...hall.aliases]) dish = dish.replace(new RegExp(alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "ig"), " ");
+      dish = dish.replace(/\b\d+\b/g, " ").replace(/\b(and|where|how|long|much|wait|there)\b/g, " ");
+      dish = dish.replace(/\s+/g, " ").trim();
+      if (dish.length > 2) intent.item = dish;
+    }
+  } else if (kind) {
     intent.action = "nearby";
     intent.what = kind.id;
     if (near && !/^(me|here|my location)$/.test(near[1])) intent.place = near[1];

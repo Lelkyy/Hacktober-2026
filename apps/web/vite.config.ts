@@ -6,6 +6,9 @@ export default defineConfig({
   server: {
     port: 5173,
     // The chatbot's installed Gemma (Ollama). Same origin, so the key never goes to the browser.
-    proxy: { "/ollama": { target: "http://127.0.0.1:11434", rewrite: (path) => path.replace(/^\/ollama/, "") } },
+    proxy: {
+      "/ollama": { target: "http://127.0.0.1:11434", rewrite: (path) => path.replace(/^\/ollama/, "") },
+      "/hdh": { target: "https://hdh-web.ucsd.edu", changeOrigin: true, rewrite: (path) => path.replace(/^\/hdh/, "") },
+    },
   },
 });

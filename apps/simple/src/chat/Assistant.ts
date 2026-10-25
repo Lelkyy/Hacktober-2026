@@ -18,6 +18,7 @@ import { ClassFinder, clock, dayFor, describe, type ClassOption } from "./classe
 import type { Gemma } from "./Gemma.ts";
 import type { Intent, TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
+import { explainStatus, findItems, hallNamed, loadMenu, money, prepMinutes, quote } from "./dining.ts";
 import { loadMemory, noteFact, saveMemory, type Memory } from "./memory.ts";
 import { nearbyKind, nearest } from "./nearby.ts";
 import { groupOf, nearestStop, stopNamed, stopSummary } from "./stops.ts";
@@ -144,6 +145,8 @@ export class Assistant {
         return this.nearby(intent.what ?? message, intent.place).then(finish);
       case "stop":
         return this.stopTimes(intent.place).then(finish);
+      case "order":
+        return this.orderFood(intent, message).then(finish);
       case "change":
         if (this.trip) {
           const target = this.target(intent);
@@ -276,6 +279,56 @@ export class Assistant {
     // Near a named place: start from it unless we know where you are.
     if (near && !(await this.start())) this.from = this.find(near);
     return this.go();
+  }
+
+  /**
+   * A Triton2Go question: today's HDH price times the quantity, the refundable box,
+   * and what the app's wait words actually mean. Then the route to that hall.
+   */
+  private async orderFood(intent: Intent, message: string): Promise<Reply> {
+    const status = explainStatus(message);
+    const hall = hallNamed(intent.place ?? "") ?? hallNamed(message);
+    if (!hall) {
+      return {
+        text:
+          status ??
+          `Which dining hall? Pines, 64 Degrees, OceanView, Ventanas, the Bistro, Foodworx, Sixth, or Club Med. I can price a dish off today's menu and take you there.`,
+      };
+    }
+    let menu;
+    try {
+      menu = await loadMenu(hall);
+    } catch {
+      return {
+        text: `${status ? `${status} ` : ""}I couldn't load the ${hall.name} menu just now. A Triton2Go box is a $5 refundable deposit unless the item is a drink, pizza, burrito, wrap, sandwich, or pastry. Only "Pick up" or "Ready now" means it's ready.`,
+      };
+    }
+    const matches = intent.item ? findItems(menu, intent.item) : [];
+    const qty = intent.quantity ?? 1;
+    let bill: string;
+    if (matches.length > 1) {
+      const lines = matches.slice(0, 6).map((item) => {
+        const each = item.price;
+        return each !== undefined ? `${qty} × ${item.name}: ${money(each)} each, ${money(each * qty)}` : item.name;
+      });
+      const prep = prepMinutes(matches[0].name, hall);
+      bill = `${qty} bobas at ${hall.name} (${menu.hours}):\n${lines.join("\n")}\nDrinks skip the $5 Triton2Go box. About ${prep} min once the kitchen has the ticket. Only "Pick up" or "Ready now" means it's ready.`;
+    } else if (matches.length === 1) {
+      bill = quote(menu, matches[0], qty);
+    } else {
+      const sample = menu.items
+        .filter((i) => i.price !== undefined)
+        .slice(0, 4)
+        .map((i) => `${i.name} ${money(i.price!)}`)
+        .join(", ");
+      bill = `${hall.name} is ${menu.hours}.${sample ? ` A few prices: ${sample}.` : ""} ${status ?? `Name a dish and how many, like "2 boba at Pines".`}`;
+    }
+    if (status) bill = `${bill} ${status}`;
+    const place = this.find(hall.place);
+    if (!place) return { text: bill };
+    this.trip = { to: place, arriveBy: null, title: hall.name };
+    const routed = await this.go();
+    return { ...routed, text: `${bill}\n${routed.text}` };
   }
 
   /** "Next bus at Gilman": the stop's timetable and live buses; the stop nearest you if none is named. */
