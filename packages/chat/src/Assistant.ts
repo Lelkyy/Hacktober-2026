@@ -22,6 +22,7 @@ import type { ChatModel } from "./ChatModel.ts";
 import type { Intent, TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
 import { explainStatus, findItems, hallNamed, loadMenu, money, prepMinutes, quote } from "./dining.ts";
+import { placesFor, tenderPlaces, type Tender } from "./payment.ts";
 import { HALL_PLACE, pricePhrase, recommend, resolveHall, type FoodPick, type ScrapedMenus } from "./menus.ts";
 import { loadMemory, noteFact, saveMemory, type Memory } from "./memory.ts";
 import { nearbyKind, nearest } from "./nearby.ts";
@@ -418,9 +419,17 @@ export class Assistant {
 
   private toPlace(query: string, arriveBy: Date | null): Reply | Promise<Reply> {
     const place = this.find(query);
-    if (!place) return { text: `I couldn't find "${query}" on campus.` };
-    this.trip = { to: place, arriveBy, title: `${place.label}${arriveBy ? `, by ${when(arriveBy)}` : ""}`, name: place.label };
-    return this.go();
+    if (place) {
+      this.trip = { to: place, arriveBy, title: `${place.label}${arriveBy ? `, by ${when(arriveBy)}` : ""}`, name: place.label };
+      return this.go();
+    }
+    // A dish rather than a shop ("map me to boba"): the hall that serves it.
+    const menus = this.campus.menus;
+    if (menus?.items.length) {
+      const picks = recommend(menus, { item: query });
+      if (picks.length) return this.orderFromMenus({ action: "order", item: query }, query, menus);
+    }
+    return { text: `I couldn't find "${query}" on campus.` };
   }
 
   /** The nearest restroom, water, coffee… to you (or to the place named), and the way there. */
@@ -460,12 +469,40 @@ export class Assistant {
     return this.go();
   }
 
+  /** Places that take Dining Dollars, Triton Cash, or EBT, and a route to the nearest when asked. */
+  private async payPlaces(tender: Tender, nearestOne: boolean): Promise<Reply> {
+    const label = tender === "dollars" ? "Dining Dollars" : tender === "cash" ? "Triton Cash" : "EBT";
+    const list = placesFor(tender);
+    if (!nearestOne) return { text: list };
+    const here = await this.start();
+    if (!here) return this.askWhere(`${list}\nWhere are you? I'll take you to the nearest place that takes ${label}.`, () => this.payPlaces(tender, true));
+    const at = endpointPosition(here.endpoint);
+    const ranked = tenderPlaces(tender)
+      .flatMap((name) => {
+        const hit = this.find(name);
+        if (!hit) return [];
+        const there = endpointPosition(hit.endpoint);
+        return [{ name, hit, meters: haversine(at[0], at[1], there[0], there[1]) }];
+      })
+      .sort((a, b) => a.meters - b.meters);
+    if (!ranked.length) return { text: list };
+    const [best, ...rest] = ranked;
+    const others = rest.slice(0, 2).map((spot) => `${spot.name} (${distance(spot.meters)})`).join(", ");
+    this.trip = { to: best.hit, arriveBy: null, title: best.name, name: best.name };
+    const routed = await this.go();
+    return {
+      ...routed,
+      text: `${list}\nNearest to ${here.label} is ${best.name}, about ${distance(best.meters)}.${others ? ` Also nearby: ${others}.` : ""}\n${routed.text}`,
+    };
+  }
+
   /**
    * A Triton2Go question: today's HDH price times the quantity, the refundable box,
    * and what the app's wait words actually mean. Then the route to that hall.
    */
   private async orderFood(intent: Intent, message: string): Promise<Reply> {
     const status = explainStatus(message);
+    if (intent.tender && !intent.item) return this.payPlaces(intent.tender, !!intent.nearest);
     const menus = this.campus.menus;
     if (menus?.items.length) return this.orderFromMenus(intent, message, menus, status);
     const hall = hallNamed(intent.place ?? "") ?? hallNamed(message);
@@ -750,7 +787,17 @@ export class Assistant {
   }
 
   private find(query: string): Place | null {
-    const hit = this.campus.search.search(query, { limit: 1 })[0];
+    const hits = this.campus.search.search(query, { limit: 8 });
+    const q = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    // A food stall ("Taco Bell") should beat a building the words only partly match.
+    const stall = hits.find((hit) => {
+      if (hit.kind !== "place") return false;
+      return [hit.place.name, ...hit.place.aliases].some((name) => {
+        const n = name.toLowerCase();
+        return n === q || n.includes(q) || q.includes(n);
+      });
+    });
+    const hit = stall ?? hits[0];
     return hit ? { endpoint: endpoint(hit), label: label(hit) } : null;
   }
 }

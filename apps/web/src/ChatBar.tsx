@@ -18,7 +18,7 @@ export interface ChatHandle {
   run(label: string, work: (assistant: Assistant) => Reply | Promise<Reply>): void;
 }
 
-const EXAMPLES = ["What's good under $10?", "Nearest restroom", "Next bus at Gilman"];
+const EXAMPLES = ["What's good under $10?", "What takes Dining Dollars?", "What takes Triton Cash?"];
 
 /**
  * The chat bar under the map: say where you need to be ("I have MATH 20C in 30

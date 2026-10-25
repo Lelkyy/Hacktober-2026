@@ -1,6 +1,7 @@
 import type { ModeId } from "@campus/core";
 import { hallNamed } from "./dining.ts";
 import { budgetOf, dishOf, resolveHall } from "./menus.ts";
+import { PAYMENT_GUIDE, type Tender } from "./payment.ts";
 import { nearbyKind } from "./nearby.ts";
 
 /**
@@ -44,6 +45,10 @@ export interface Intent {
   maxInclusive?: boolean;
   /** "at least $5" -> 5. Dollars. */
   minPrice?: number;
+  /** Which places take this: Dining Dollars, Triton Cash, or EBT. */
+  tender?: Tender;
+  /** The closest of those places, not the whole list. */
+  nearest?: boolean;
   /** "in 30 minutes" -> 30. */
   inMinutes?: number;
   /** "at 3pm" -> "15:00" (24h). */
@@ -74,6 +79,8 @@ export const INTENT_SCHEMA = {
     quantity: { type: "number" },
     minPrice: { type: "number" },
     maxPrice: { type: "number" },
+    tender: { type: "string", enum: ["dollars", "cash", "ebt"] },
+    nearest: { type: "boolean" },
     course: { type: "string" },
     meeting: { type: "string", enum: ["lecture", "discussion", "lab", "midterm", "final"] },
     place: { type: "string" },
@@ -98,6 +105,7 @@ export function systemPrompt(now: Date, facts: string[] = []): string {
     : "";
   return `You turn a UC San Diego student's chat message into JSON for a campus navigation app. It is ${today}, ${time}.
 Only copy what the message says; never invent rooms, buildings or times. Leave out fields the message doesn't mention.${known}
+${PAYMENT_GUIDE}
 - action "class": they're going to a class. course = the course code as written ("math 20c" -> "MATH 20C"). meeting = lecture/discussion/lab/midterm/final if said.
 - action "route": they want to go somewhere that isn't a class. place = where.
 - action "nearby": they want the closest restroom, water refill, coffee, food, vending machine, printer, study spot, computer lab, parking, EV charger, bike rack, Spin hub, ATM, mailbox, laundry, lactation room, AED or clinic. what = one word for it. place = "near X" if said.
@@ -120,6 +128,8 @@ Examples:
 "I have math 20C today in 30 minutes" -> {"action":"class","course":"MATH 20C","day":"today","inMinutes":30}
 "cse 12 discussion at 4, biking from the price center" -> {"action":"class","course":"CSE 12","meeting":"discussion","at":"16:00","mode":"bike","from":"Price Center"}
 "how do I get to geisel" -> {"action":"route","place":"Geisel"}
+"map me to taco bell" -> {"action":"route","place":"Taco Bell"}
+"map me to boba" -> {"action":"route","place":"boba"}
 "where's the nearest bathroom" -> {"action":"nearby","what":"restroom"}
 "I need coffee near WLH" -> {"action":"nearby","what":"coffee","place":"WLH"}
 "when's the next bus at Gilman" -> {"action":"stop","place":"Gilman"}
@@ -133,7 +143,10 @@ Examples:
 "I use a wheelchair" -> {"action":"other","mode":"accessible","remember":["Needs a step-free route"],"reply":"I'll keep your routes step-free."}
 "two matcha boba at Pines, how much and how long" -> {"action":"order","place":"Pines","item":"matcha boba","quantity":2}
 "what's good under $10" -> {"action":"order","maxPrice":10}
-"burrito at 64 degrees under 12, from Price Center" -> {"action":"order","place":"64 Degrees","item":"burrito","maxPrice":12,"from":"Price Center"}`;
+"burrito at 64 degrees under 12, from Price Center" -> {"action":"order","place":"64 Degrees","item":"burrito","maxPrice":12,"from":"Price Center"}
+"what accepts dining dollars" -> {"action":"order","tender":"dollars"}
+"what accepts triton cash" -> {"action":"order","tender":"cash"}
+"nearest place that takes dining dollars" -> {"action":"order","tender":"dollars","nearest":true}`;
 }
 
 /** Make whatever came back safe to use: drop unknown fields and bad values. */
@@ -150,6 +163,8 @@ export function cleanIntent(raw: unknown): Intent | null {
   const dollars = (v: unknown) => (typeof v === "number" && v >= 0 && v <= 80 ? Math.round(v * 100) / 100 : undefined);
   intent.minPrice = dollars(r.minPrice);
   intent.maxPrice = dollars(r.maxPrice);
+  if (r.tender === "dollars" || r.tender === "cash" || r.tender === "ebt") intent.tender = r.tender;
+  if (r.nearest === true) intent.nearest = true;
   if (intent.minPrice != null && intent.maxPrice != null && intent.minPrice > intent.maxPrice) {
     const swap = intent.minPrice;
     intent.minPrice = intent.maxPrice;
@@ -244,7 +259,7 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
   else if (/\blecture\b/.test(rest)) intent.meeting = "lecture";
 
   const to = text.match(
-    new RegExp(String.raw`\b(?:get to|go to|going to|take me to|directions to|route to|navigate to|head to|heading to|walk to|bike to|where(?:'s| is)|how do i get to|to(?!\s+(?:get|go|be|find|head|walk|bike|ride|take|make)\b))\s+(?:the\s+)?(.+?)${stopWords}`),
+    new RegExp(String.raw`\b(?:get to|go to|going to|take me to|map me to|map to|show me|bring me to|get me to|send me to|directions to|route to|navigate to|head to|heading to|walk to|bike to|where(?:'s| is)|how do i get to|to(?!\s+(?:get|go|be|find|head|walk|bike|ride|take|make|map)\b))\s+(?:the\s+)?(.+?)${stopWords}`),
   );
 
   const near = text.match(new RegExp(String.raw`\b(?:near|by|around|close to|next to)\s+(?:the\s+)?(.+?)${stopWords}`));
@@ -254,6 +269,15 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
     budget.min != null ||
     budget.max != null ||
     /\b(best|recommend|suggestion|what should i (?:eat|get|order)|what(?:'s| is) good|something to eat|cheap food|hungry)\b/.test(text);
+  const dollars = /\b(dining dollars?|triton dollars?)\b/.test(text);
+  const cash = /\btriton cash\b/.test(text);
+  const ebt = /\b(ebt|calfresh)\b/.test(text);
+  const askingPay = /\b(places?|spots?|where|which|what|who|accepts?|takes?|use|using|nearest|closest|find)\b/.test(text);
+  if (!intent.course && (dollars || cash || ebt) && askingPay && !resolveHall(text)) {
+    intent.action = "order";
+    intent.tender = dollars ? "dollars" : cash ? "cash" : "ebt";
+    if (/\b(nearest|closest|near me|around me)\b/.test(text) || (/\bfind\b/.test(text) && /\b(places?|spots?)\b/.test(text))) intent.nearest = true;
+  }
   const ordering =
     /\b(how much|price|cost|costs|order|menu|triton2\s?go|waiting for release|ready now|working on it)\b/.test(text) ||
     (!!hallNamed(text) && /\b(how long|wait)\b/.test(text)) ||
@@ -262,7 +286,9 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
   if (intent.course && /\b(add|taking|i take|enroll(ed)?( in)?|register(ed)?( for)?|sign me up)\b/.test(text)) intent.action = "add";
   else if (intent.course && /\b(drop|dropped|remove|delete|forget|not taking|no longer)\b/.test(text)) intent.action = "drop";
   else if (intent.course) intent.action = "class";
-  else if (ordering) {
+  else if (intent.tender) {
+    // A payment question: the sentence is not a dish.
+  } else if (ordering) {
     intent.action = "order";
     const hall = resolveHall(text) ?? hallNamed(text)?.name;
     if (hall) intent.place = hall;

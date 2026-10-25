@@ -100,11 +100,22 @@ export class ChatModel {
       if (!intent.from && fallback.from) intent.from = fallback.from;
       if (fallback.remember && !intent.mode && fallback.mode) intent.mode = fallback.mode;
       // "2 bobas at Pines, how long and where" is an order even if the model reads "where" as a route.
+      // "map me to Taco Bell" is a route even if the model files it as something else.
+      if (fallback.action === "route" && fallback.place) {
+        intent.action = "route";
+        intent.place = fallback.place;
+      }
       if (fallback.action === "order") {
         intent.action = "order";
         intent.place = fallback.place ?? intent.place;
         intent.item = fallback.item ?? intent.item;
         intent.quantity = fallback.quantity ?? intent.quantity;
+        if (fallback.tender) {
+          intent.tender = fallback.tender;
+          intent.nearest = fallback.nearest || intent.nearest;
+          intent.item = undefined;
+          intent.place = undefined;
+        }
       }
       // The model reads sentences better; the patterns know which course codes exist.
       if (intent.course && !this.isCourse(intent.course)) intent.course = fallback.course;
