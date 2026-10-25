@@ -1,132 +1,161 @@
-import {
-  arrivalsAtStops,
-  linesAtStops,
-  sameNameCluster,
-  shapesAtStops,
-  type Endpoint,
-  type LiveVehicle,
-  type ModeId,
-  type SearchHit,
-} from "@campus/core";
+import { courseKey, shapesAtStops, type LiveVehicle, type LngLat, type Route } from "@campus/core";
+import { Assistant, ChatModel, groupOf, Location, stopSummary, TripPlanner, type Reply } from "@campus/chat";
 import { Campus } from "./campus/loadCampus.ts";
 import { LiveFeed } from "./live/LiveFeed.ts";
 import { CampusMap } from "./map/CampusMap.ts";
-import { TripPlanner } from "./trip/TripPlanner.ts";
+import { settings } from "./settings.ts";
 
 /**
  * Starts the pieces and connects them.
- * Read this file top to bottom: load campus, draw it, poll buses, then listen to the form.
+ * Read this file top to bottom: load campus, draw it, poll buses, find Gemma, then listen to the chat.
  */
 export class App {
   private campus!: Campus;
   private map!: CampusMap;
-  private planner!: TripPlanner;
-  private from: Endpoint | null = null;
-  private to: Endpoint | null = null;
-  private routeFilter: string | null = null;
+  private assistant!: Assistant;
+  private readonly messages = document.querySelector<HTMLOListElement>("#messages")!;
+  private readonly form = document.querySelector<HTMLFormElement>("#ask")!;
+  private readonly prompt = document.querySelector<HTMLInputElement>("#prompt")!;
+  private busy = false;
+  private vehicles: LiveVehicle[] = [];
 
-  constructor(private readonly root: { status: HTMLElement; stop: HTMLElement; trip: HTMLElement }) {}
+  constructor(private readonly status: HTMLElement) {
+    // Never a page load, even before the chat is ready.
+    this.form.addEventListener("submit", (event) => event.preventDefault());
+  }
 
   async start(): Promise<void> {
     this.campus = await Campus.load();
-    this.planner = new TripPlanner(this.campus);
     this.map = new CampusMap(document.querySelector("#map")!, {
       onStop: (id) => this.openStop(id),
       onVehicle: (vehicle) => this.openVehicle(vehicle),
-      onEmpty: () => this.closeStop(),
+      onEmpty: () => void this.map.showHighlight([]),
     }, this.campus.graph.data.bbox);
     await this.map.showTransit(this.campus.transit);
-    this.root.status.textContent = "Campus loaded. Buses update every few seconds.";
     new LiveFeed(
-      (vehicles) => void this.map.showVehicles(vehicles),
-      (message) => (this.root.status.textContent = message),
+      (vehicles) => {
+        this.vehicles = vehicles;
+        void this.map.showVehicles(vehicles);
+      },
+      () => {}, // Live-feed problems stay out of the chat; the map just shows no buses.
     ).start();
-    this.bindSearch("from", (hit) => {
-      this.from = hit;
-      this.drawTrip();
+    const location = new Location(this.campus.graph.data.bbox, (at) => void this.map.showMe(at));
+    void location.start();
+
+    const courses = new Set(this.campus.sections?.courses.map((c) => courseKey(c.code)));
+    const isCourse = (code: string) => courses.has(courseKey(code));
+    const model = new ChatModel(settings, isCourse, (message) => (this.status.textContent = message));
+    await model.connect();
+    this.assistant = new Assistant({
+      campus: this.campus,
+      planner: new TripPlanner(this.campus),
+      model,
+      location,
+      vehicles: () => this.vehicles,
+      view: {
+        trip: (trip) => this.drawTrip(trip?.route ?? null),
+        markers: (points) => void this.map.showMarkers(points),
+        stop: (ids, at) => this.showStop(ids, at),
+      },
+      settings,
     });
-    this.bindSearch("to", (hit) => {
-      this.to = hit;
-      this.drawTrip();
+
+    this.say("bot", this.assistant.greeting(["What do I have today?", "Nearest restroom", "Next bus at Gilman", "Add MATH 20C"]));
+    this.form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = this.prompt.value.trim();
+      if (!text || this.busy) return;
+      this.prompt.value = "";
+      void this.ask(text);
     });
-    document.querySelector("#mode")!.addEventListener("change", () => this.drawTrip());
-    document.querySelector("#stop-back")!.addEventListener("click", () => this.closeStop());
+    this.prompt.disabled = false;
+    this.form.querySelector("button")!.disabled = false;
+    this.prompt.focus();
   }
 
-  private bindSearch(id: "from" | "to", choose: (endpoint: Endpoint) => void): void {
-    const input = document.querySelector<HTMLInputElement>(`#${id}`)!;
-    const list = document.querySelector<HTMLUListElement>(`#${id}-hits`)!;
-    input.addEventListener("input", () => {
-      const hits = input.value.trim() ? this.campus.search.search(input.value, { limit: 6 }) : [];
-      list.hidden = hits.length === 0;
-      list.replaceChildren(...hits.map((hit) => {
-        const item = document.createElement("li");
+  private ask(text: string): Promise<void> {
+    this.say("user", { text });
+    return this.answer(() => this.assistant.handle(text));
+  }
+
+  /** Show "Thinking…" while `work` runs, then its reply. */
+  private async answer(work: () => Promise<Reply>): Promise<void> {
+    this.busy = true;
+    const thinking = this.say("bot", { text: "Thinking…" });
+    thinking.classList.add("thinking");
+    let reply: Reply;
+    try {
+      reply = await work();
+    } catch (err) {
+      console.error(err);
+      reply = { text: "Something went wrong planning that. Try saying it another way." };
+    }
+    thinking.remove();
+    this.say("bot", reply);
+    this.busy = false;
+  }
+
+  private say(who: "user" | "bot", reply: Reply): HTMLLIElement {
+    const item = document.createElement("li");
+    item.className = `msg ${who}`;
+    item.textContent = reply.text;
+    if (reply.steps?.length) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = `Directions (${reply.steps.length} steps)`;
+      const list = document.createElement("ol");
+      list.append(...reply.steps.map((step) => Object.assign(document.createElement("li"), { textContent: step })));
+      details.append(summary, list);
+      item.append(details);
+    }
+    if (reply.choices?.length) {
+      const row = document.createElement("div");
+      row.className = "choices";
+      for (const choice of reply.choices) {
         const button = document.createElement("button");
         button.type = "button";
-        button.textContent = label(hit);
+        button.textContent = choice.label;
         button.onclick = () => {
-          input.value = label(hit);
-          list.hidden = true;
-          choose(endpoint(hit));
+          if (this.busy) return;
+          // A choice is used once: the conversation has moved on.
+          row.querySelectorAll("button").forEach((b) => (b.disabled = true));
+          this.say("user", { text: choice.label });
+          void this.answer(choice.pick);
         };
-        item.append(button);
-        return item;
-      }));
-    });
+        row.append(button);
+      }
+      item.append(row);
+    }
+    this.messages.append(item);
+    item.scrollIntoView({ block: "end", behavior: "smooth" });
+    return item;
   }
 
-  private drawTrip(): void {
-    if (!this.from || !this.to) return;
-    const mode = (document.querySelector<HTMLSelectElement>("#mode")!.value || "walk") as ModeId;
-    const planned = this.planner.plan(this.from, this.to, mode);
-    this.root.trip.textContent = planned.note;
+  private drawTrip(route: Route | null): void {
     // The bus and trolley lines this trip rides: shown with the trip, hidden otherwise.
     const { patterns } = this.campus.transit.data;
-    const lines = (planned.route?.legs ?? []).flatMap((leg) =>
+    const lines = (route?.legs ?? []).flatMap((leg) =>
       leg.mode === "bus" ? [{ color: leg.route.color, route: patterns[leg.pattern]?.shape ?? [], ridden: leg.coordinates }] : [],
     );
-    void this.map.showTrip(planned.route?.coordinates ?? [], lines);
-    this.map.fitTrip(planned.route?.coordinates ?? []);
+    void this.map.showHighlight([]);
+    void this.map.showTrip(route?.coordinates ?? [], lines);
+    // After the chat bar has grown with the new message, so the trip fits what's left.
+    requestAnimationFrame(() => this.map.fitTrip(route?.coordinates ?? []));
   }
 
+  /** A tapped stop: its lines on the map, its next departures in the chat. */
   private openStop(id: string): void {
     const stop = this.campus.transit.data.stops.find((s) => s.id === id);
     if (!stop) return;
-    const cluster = sameNameCluster(this.campus.transit.data.stops, stop);
-    const ids = (cluster.length ? cluster : [stop]).map((s) => s.id);
-    this.routeFilter = null;
-    this.root.stop.hidden = false;
-    document.querySelector("#stop-name")!.textContent = stop.name;
-    this.renderStop(ids);
-    this.map.focus(stop.lngLat);
+    const group = groupOf(this.campus, stop);
+    this.showStop(group.ids, stop.lngLat);
+    this.say("bot", { text: stopSummary(this.campus, group, this.vehicles) });
   }
 
-  private renderStop(ids: string[]): void {
-    const lines = linesAtStops(this.campus.transit, ids);
-    const box = document.querySelector("#stop-lines")!;
-    box.replaceChildren();
-    for (const line of lines) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `line ${this.routeFilter === line.route.id ? "on" : ""}`;
-      button.style.setProperty("--c", line.route.color);
-      button.textContent = line.route.mode === "trolley" ? `${line.route.short} Line` : line.route.short;
-      button.onclick = () => {
-        this.routeFilter = this.routeFilter === line.route.id ? null : line.route.id;
-        this.renderStop(ids);
-      };
-      box.append(button);
-    }
-    const shapes = shapesAtStops(this.campus.transit, ids).filter((s) => !this.routeFilter || s.route.id === this.routeFilter);
+  private showStop(ids: string[], at: LngLat): void {
+    const shapes = shapesAtStops(this.campus.transit, ids);
     void this.map.showHighlight(shapes.map((s) => ({ color: s.route.color, coordinates: s.shape })));
-    const times = document.querySelector("#stop-times")!;
-    const arrivals = arrivalsAtStops(this.campus.transit, ids, new Date(), 12)
-      .filter((a) => !this.routeFilter || a.route.id === this.routeFilter);
-    times.replaceChildren(...arrivals.map((a) => {
-      const item = document.createElement("li");
-      item.textContent = `${a.route.short} ${a.headsign} · ${a.at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
-      return item;
-    }));
+    this.map.focus(at);
   }
 
   private openVehicle(vehicle: LiveVehicle): void {
@@ -135,32 +164,10 @@ export class App {
       if (!route || route.short !== vehicle.route || pattern.shape.length < 2) return [];
       return [{ color: vehicle.color, coordinates: pattern.shape }];
     });
-    this.root.stop.hidden = true;
     void this.map.showHighlight(shapes);
-    this.root.trip.textContent = `${vehicle.mode === "trolley" ? vehicle.line : `Route ${vehicle.line}`} · last GPS ${age(vehicle.fixAt)}`;
     this.map.focus(vehicle.lngLat);
+    this.say("bot", { text: `${vehicle.mode === "trolley" ? vehicle.line : `Route ${vehicle.line}`} · last GPS ${age(vehicle.fixAt)}` });
   }
-
-  private closeStop(): void {
-    this.root.stop.hidden = true;
-    void this.map.showHighlight([]);
-  }
-}
-
-function label(hit: SearchHit): string {
-  if (hit.kind === "building") return hit.building.name;
-  if (hit.kind === "place") return hit.place.name;
-  if (hit.kind === "room") return `${hit.building.name} ${hit.room}`;
-  if (hit.kind === "class") return hit.meeting.course;
-  return hit.course.title;
-}
-
-function endpoint(hit: SearchHit): Endpoint {
-  if (hit.kind === "place") return { kind: "place", place: hit.place };
-  if (hit.kind === "building") return { kind: "building", building: hit.building };
-  if (hit.kind === "room") return { kind: "building", building: hit.building, room: hit.room };
-  if (hit.kind === "class") return { kind: "building", building: hit.building };
-  return { kind: "building", building: hit.building, room: hit.room };
 }
 
 function age(fixAt: number): string {

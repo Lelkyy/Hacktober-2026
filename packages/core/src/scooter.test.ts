@@ -62,6 +62,8 @@ describe("scooters on real campus data", () => {
     )!;
     expect(e).toBeDefined();
     expect(edgeTravel(graph, PROFILES.scooter, e, graph.edgeFrom[e]).push).toBe(true);
+    const sidewalk = Array.from({ length: graph.edgeCount }, (_, i) => i).find((i) => graph.kind(i) === EdgeKind.Sidewalk && graph.edgeLength[i] > 15)!;
+    expect(edgeTravel(graph, PROFILES.scooter, sidewalk, graph.edgeFrom[sidewalk]).push).toBe(true);
     expect(edgeTravel(graph, PROFILES.bike, e, graph.edgeFrom[e]).push).toBe(false);
   });
 

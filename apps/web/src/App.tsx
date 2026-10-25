@@ -18,9 +18,6 @@ import {
   insideHints,
   endpointLabel,
   endpointPosition,
-  CLASS_BUFFER_MIN,
-  nextOccurrence,
-  startOn,
   planRoute,
   type ClassMeeting,
   type Endpoint,
@@ -48,8 +45,11 @@ import {
   type ScooterTrip,
   BikeDir,
 } from "@campus/core";
-import { useCallback, useEffect, useMemo, useState, type JSX } from "react";
+import { importClasses, Location, type ChatCampus, type ChatView } from "@campus/chat";
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 import { BuildingSearch } from "./BuildingSearch.tsx";
+import { ChatBar, type ChatHandle } from "./ChatBar.tsx";
+import { MyClasses } from "./MyClasses.tsx";
 import { loadCampus, storage, type CampusData } from "./data.ts";
 import { Itinerary, formatDistance, formatTime } from "./Itinerary.tsx";
 import { PALETTE } from "./palette.ts";
@@ -58,7 +58,7 @@ import { SpinButton } from "./SpinButton.tsx";
 import { fetchSpinVehicles, fetchSpinZones, SPIN_REFRESH_MS } from "./spin.ts";
 import { LiveTransitButton, StopsButton } from "./LiveTransitButton.tsx";
 import { fetchLiveVehicles, MTS_LIVE, LIVE_REFRESH_MS } from "./mts.ts";
-import { MapView, type BaseMap, type CampusPlaces, type DayOverlay, type RouteLine } from "./MapView.tsx";
+import { MapView, type BaseMap, type CampusPlaces, type RouteLine } from "./MapView.tsx";
 import { lineBadges, lineColor } from "./lineColor.ts";
 import { StopPanel } from "./StopPanel.tsx";
 import {
@@ -79,14 +79,11 @@ import { InsideCard } from "./InsideCard.tsx";
 import { DiningMenu } from "./DiningMenu.tsx";
 import { findDining, type DiningMenus } from "./diningMenu.ts";
 import { NavigationView } from "./NavigationView.tsx";
-import type { DirectionsOptions } from "./DayView.tsx";
 import { TimingControl, type TimingState } from "./TimingControl.tsx";
 import { TransitPanel } from "./TransitPanel.tsx";
 import { PlaceNamer } from "./PlaceNamer.tsx";
 import { ReportPanel, type RouteContext } from "./ReportPanel.tsx";
 import { HOME_ID, useSavedPlaces } from "./useSavedPlaces.ts";
-import { NextUp, SchedulePanel, type ScheduleView } from "./SchedulePanel.tsx";
-import { useSchedule } from "./useSchedule.ts";
 
 /** Suggest transit while walking only when it saves at least this much time. */
 const SUGGEST_MIN_FASTER = 3;
@@ -98,24 +95,28 @@ const MODE_ICONS: Record<ModeId, () => JSX.Element> = { walk: WalkIcon, accessib
 /** Spin's orange, for scooter rides on the map. */
 const SPIN_COLOR = "#FF5A1F";
 
-type Tab = "go" | "schedule" | "report";
+type Tab = "go" | "report";
 
 export function App() {
   const [data, setData] = useState<CampusData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("go");
-  const schedule = useSchedule();
   const saved = useSavedPlaces();
+  // The old Schedule tab's classes become the chat's, once: your lectures live in the chat now.
+  useEffect(() => {
+    if (storage.get("campus-nav:schedule-moved-to-chat", false)) return;
+    importClasses(storage.get<ClassMeeting[]>("campus-nav:schedule:v2", []));
+    storage.set("campus-nav:schedule-moved-to-chat", true);
+  }, []);
   /** Camera moves ("Show it on the map"). */
   const [focus, setFocus] = useState<{ at: LngLat; zoom: number; key: number } | null>(null);
   /** The "Save place" form under a route is open. */
   const [naming, setNaming] = useState(false);
+  /** The Advanced section (manual trip planning, map layers) is open. */
+  const [advanced, setAdvanced] = useState<boolean>(() => storage.get("campus-nav:advanced", false));
+  useEffect(() => storage.set("campus-nav:advanced", advanced), [advanced]);
   /** Saving your home: which field asked (it gets Home once you tap the map). */
   const [settingHome, setSettingHome] = useState<"from" | "to" | null>(null);
-  /** The day view's walks and classes, drawn on the map while it's open. */
-  const [dayOverlay, setDayOverlay] = useState<DayOverlay | null>(null);
-  const [scheduleView, setScheduleView] = useState<ScheduleView>(() => storage.get<ScheduleView>("campus-nav:schedule-view", "day"));
-  useEffect(() => storage.set("campus-nav:schedule-view", scheduleView), [scheduleView]);
   /** Rooms mapped indoors (CSE, Cala), for floors and room spots. */
   const indoor = useMemo<IndoorData>(() => data?.indoor ?? {}, [data]);
   /** Live turn-by-turn navigation, and your position while it's running. */
@@ -563,66 +564,6 @@ export function App() {
   /** Where your dot goes: in the middle of the building you're in, else where the GPS says. */
   const here = useMemo(() => (myLocation ? meAt(myLocation).lngLat : null), [myLocation, meAt]);
 
-  /** When to leave the current start for a class (null without a start or a route). */
-  const estimateClass = useCallback(
-    (buildingId: string, startsAt: Date): Route | null => {
-      const start = from ?? (myLocation ? meAt(myLocation) : null);
-      const building = data?.buildingById.get(buildingId);
-      if (!start || !building) return null;
-      const arrive = new Date(startsAt.getTime() - CLASS_BUFFER_MIN * 60_000);
-      const dest: Endpoint = { kind: "building", building };
-      if (mode === "bus" || (building.access === "shuttle" && mode !== "bike")) {
-        // The top transit option, as in the Transit list.
-        return transitFor(start, dest, { arriveBy: arrive })?.options[0]?.route ?? null;
-      }
-      // A scooter may not be there later: time the walk.
-      const p = planFor(mode === "scooter" ? "walk" : mode, start, dest, arrive);
-      if (p?.ok) return p.route;
-      // No step-free route there: still say when to leave, using the walk.
-      const w = mode === "accessible" ? planFor("walk", start, dest, arrive) : null;
-      return w?.ok ? w.route : null;
-    },
-    [data, from, myLocation, meAt, mode, planFor, transitFor],
-  );
-
-  /** Getting from one class's building to the next (the day view): on foot, or by bike / step-free in those modes. */
-  const estimateBetween = useCallback(
-    (fromId: string, toId: string, arrive: Date): Route | null => {
-      const a = data?.buildingById.get(fromId);
-      const b = data?.buildingById.get(toId);
-      if (!a || !b) return null;
-      const m: ModeId = mode === "bike" || mode === "accessible" ? mode : "walk";
-      const p = planFor(m, { kind: "building", building: a }, { kind: "building", building: b }, arrive);
-      return p?.ok ? p.route : null;
-    },
-    [data, mode, planFor],
-  );
-
-  /**
-   * The day view's trips to and from your saved home: arriving at a class by
-   * `at` ("to"), or leaving one at `at` ("from"). By shuttle in Transit mode,
-   * since home is often off campus; otherwise in your mode, on foot as a fallback.
-   */
-  const estimateHome = useCallback(
-    (buildingId: string, dir: "to" | "from", at: Date): Route | null => {
-      const building = data?.buildingById.get(buildingId);
-      if (!saved.home || !building) return null;
-      const home: Endpoint = { kind: "place", place: saved.home };
-      const there: Endpoint = { kind: "building", building };
-      const [a, b] = dir === "to" ? [home, there] : [there, home];
-      const timing = dir === "to" ? { arriveBy: at } : { departAt: at };
-      if (mode === "bus") {
-        const best = transitFor(a, b, timing)?.options[0]?.route;
-        if (best) return best;
-      }
-      const m: ModeId = mode === "bike" || mode === "accessible" ? mode : "walk";
-      const p = planFor(m, a, b, timing.arriveBy, timing.departAt);
-      if (p?.ok) return p.route;
-      const w = m !== "walk" ? planFor("walk", a, b, timing.arriveBy, timing.departAt) : null;
-      return w?.ok ? w.route : null;
-    },
-    [data, saved.home, mode, planFor, transitFor],
-  );
 
   // Saved places, student names and stops, then food, courts and pools from the campus map and dining lists.
   const allPlaces = useMemo(
@@ -634,6 +575,54 @@ export function App() {
     () => (data ? new CampusSearch({ buildings: data.buildings, places: allPlaces, courses: data.sections?.courses, indoor }) : null),
     [data, allPlaces, indoor],
   );
+  // The chat bar: the campus as the chat sees it, your location, and what it does to the map.
+  const campusPlacesRef = useRef(campusPlaces);
+  campusPlacesRef.current = campusPlaces;
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const chatCampus = useMemo<ChatCampus | null>(
+    () =>
+      data && campusSearch
+        ? {
+            graph: data.graph,
+            transit: data.transit,
+            search: campusSearch,
+            sections: data.sections,
+            buildingByCode: data.buildingByCode,
+            indoor: data.indoor,
+            // Fetched separately (and maybe later): read when asked.
+            get mapPoints() {
+              return campusPlacesRef.current;
+            },
+          }
+        : null,
+    // Once per load: a new search object (saved places) needn't restart the conversation.
+    [data],
+  );
+  const chat = useRef<ChatHandle>(null);
+  const chatLocation = useMemo(() => (data ? new Location(data.graph.data.bbox, setMyLocation) : null), [data, setMyLocation]);
+  const chatView: ChatView = {
+    trip: (trip) => {
+      if (!trip) return;
+      setNavigating(false);
+      setOpenStop(null);
+      setTab("go");
+      setSelectedOption(0);
+      setMode(trip.mode);
+      setFromRaw(trip.from);
+      setToRaw(trip.to);
+      setTiming(trip.arriveBy ? { kind: "arrive", at: trip.arriveBy, label: trip.name } : { kind: "now" });
+    },
+    markers: (_points, category) => setPlaceCategories((on) => (on.includes(category) ? on : [...on, category])),
+    stop: (ids, at) => {
+      const stop = data?.transit.data.stops.find((s) => s.id === ids[0]);
+      if (!stop) return;
+      setOpenStop(stop);
+      setSheetOpen(true);
+      setFocus({ at, zoom: 17.2, key: Date.now() });
+    },
+  };
+
   const steps = useMemo(
     () => (data && route && to ? buildSteps(data.graph, route, endpointLabel(to), { leaving: from?.kind === "point" ? from.building : undefined }) : []),
     [data, route, to, from],
@@ -674,8 +663,6 @@ export function App() {
       />
     ) : null;
 
-  // The day view takes over the map: its walks and classes instead of the current route.
-  const showingDay = tab === "schedule" && scheduleView === "day" && !!dayOverlay && !navigating;
   const routeLines: RouteLine[] | null =
     route && data
       ? route.legs.flatMap((l): RouteLine[] =>
@@ -789,45 +776,6 @@ export function App() {
     setHint(null);
   };
 
-  /**
-   * Directions to a class: for its next meeting, or a given day's (from the day
-   * view), starting from your location or from another class's room.
-   */
-  const onDirections = (meeting: ClassMeeting, opts: Partial<DirectionsOptions> = {}) => {
-    const building = data?.buildingById.get(meeting.buildingId);
-    if (!building) return setHint("That class isn't at a building on the map.");
-    setTab("go");
-    setToRaw(({ kind: "building", building, room: meeting.room }));
-    const fromBuilding = opts.from ? data?.buildingById.get(opts.from.buildingId) : undefined;
-    if (fromBuilding) setFromRaw(({ kind: "building", building: fromBuilding, room: opts.from?.room }));
-    else if (opts.fromHome && saved.home) setFromRaw({ kind: "place", place: saved.home });
-    else if (myLocation) setFromRaw(meAt(myLocation));
-    else if (!from) {
-      setClickTarget("from");
-      setHint("Choose a start: use your location, search, or click the map.");
-    }
-    if (building.access === "shuttle" && mode !== "bike") setMode("bus");
-    const start = opts.date ? startOn(meeting, opts.date) : nextOccurrence(meeting);
-    setArriveBy(
-      start
-        ? {
-            at: new Date(start.getTime() - CLASS_BUFFER_MIN * 60_000),
-            label: `${meeting.course}${meeting.type ? ` ${meeting.type}` : ""} at ${formatTime(start)}`,
-          }
-        : null,
-    );
-  };
-
-  /** Directions home from a class, leaving when it ends (the day view's last class). */
-  const onDirectionsHome = (meeting: ClassMeeting, leaveAt: Date) => {
-    const building = data?.buildingById.get(meeting.buildingId);
-    if (!building || !saved.home) return;
-    setTab("go");
-    setFromRaw(({ kind: "building", building, room: meeting.room }));
-    setToRaw({ kind: "place", place: saved.home });
-    if (building.access === "shuttle" && mode !== "bike") setMode("bus");
-    setTiming(leaveAt > new Date() ? { kind: "depart", at: leaveAt } : { kind: "now" });
-  };
 
   /** Open the Report tab, optionally about the route on screen. */
   const openReport = (aboutRoute: boolean) => {
@@ -848,32 +796,32 @@ export function App() {
   if (loadError) return <div className="fatal">Couldn't load campus data. {loadError}</div>;
 
   return (
+    <div className="shell">
     <div
       className={`app ${navigating ? "navigating" : ""}`}
     >
       {data && (
         <MapView
           graph={data.graph}
-          routeLines={showingDay ? null : routeLines}
-          day={showingDay ? dayOverlay : null}
-          connectors={plan?.ok && !showingDay ? plan.connectors : []}
+          routeLines={routeLines}
+          connectors={plan?.ok ? plan.connectors : []}
           stops={[]}
           showStops={false}
-          from={from && !showingDay ? endpointPosition(from) : null}
-          fromIsMe={fromIsMe && !showingDay}
+          from={from ? endpointPosition(from) : null}
+          fromIsMe={fromIsMe}
           heading={heading}
-          to={to && !showingDay ? endpointPosition(to) : null}
+          to={to ? endpointPosition(to) : null}
           baseMap={baseMap}
           places={campusPlaces}
           placeCategories={placeCategories}
           menus={menus}
           spinBikes={spinOn ? spinBikes : null}
           scooterRules={scooterRules}
-          scooterTrip={mode === "scooter" && scooterTrip && !showingDay ? { scooter: scooterTrip.scooter.lngLat, parking: scooterTrip.parking } : null}
+          scooterTrip={mode === "scooter" && scooterTrip ? { scooter: scooterTrip.scooter.lngLat, parking: scooterTrip.parking } : null}
           live={shownLive}
-          showTransitStops={showTransitStops && !showingDay}
-          logoStops={showingDay ? [] : logoStops}
-          stopRoutes={showingDay ? [] : stopRoutes}
+          showTransitStops={showTransitStops}
+          logoStops={logoStops}
+          stopRoutes={stopRoutes}
           onStopClick={(s) => {
             if (openStop?.id === s.id) {
               setOpenRouteId(null);
@@ -908,30 +856,7 @@ export function App() {
         />
       )}
 
-      <div className="map-tools">
-        <MapLayersMenu
-          baseMap={baseMap}
-          onBaseMap={setBaseMap}
-          places={campusPlaces}
-          categories={placeCategories}
-          onCategories={setPlaceCategories}
-          nearYou={!!here}
-        />
-        <SpinButton on={spinOn} loading={spinLoading} onToggle={() => setSpinOn((v) => !v)} />
-        <StopsButton
-          on={showTransitStops}
-          onToggle={() =>
-            setShowTransitStops((v) => {
-              if (v) setOpenStop(null);
-              return !v;
-            })
-          }
-        />
-        <LiveTransitButton mode="trolley" on={liveModes.trolley} loading={liveLoading && liveModes.trolley} onToggle={() => toggleLive("trolley")} />
-        <LiveTransitButton mode="bus" on={liveModes.bus} loading={liveLoading && liveModes.bus} onToggle={() => toggleLive("bus")} />
-      </div>
-
-      <aside className={`sheet ${sheetOpen ? "open" : ""}`} aria-label="Directions and schedule">
+      <aside className={`sheet ${sheetOpen ? "open" : ""}`} aria-label="Directions">
         <button className="sheet-handle" aria-label={sheetOpen ? "Collapse panel" : "Expand panel"} onClick={() => setSheetOpen((v) => !v)}>
           <span />
           <ChevronIcon up={!sheetOpen} />
@@ -941,15 +866,6 @@ export function App() {
             <img src="/logo-mark.png" alt="" className="brand-mark" width="26" height="32" />
             Triton Trails
           </h1>
-          <nav className="tabs" aria-label="Sections" hidden={navigating}>
-            <button className={tab === "go" ? "on" : ""} aria-current={tab === "go"} onClick={() => setTab("go")}>
-              Directions
-            </button>
-            <button className={tab === "schedule" ? "on" : ""} aria-current={tab === "schedule"} onClick={() => setTab("schedule")}>
-              Schedule
-              {schedule.meetings.length > 0 && <span className="count">{new Set(schedule.meetings.map((m) => m.course)).size}</span>}
-            </button>
-          </nav>
         </header>
 
         <div className="sheet-body">
@@ -973,188 +889,10 @@ export function App() {
             />
           ) : tab === "go" ? (
             <>
-              <NextUp
-                data={data}
-                meetings={schedule.meetings}
-                estimate={estimateClass}
-                onDirections={onDirections}
-                onSeeDay={() => {
-                  setScheduleView("day");
-                  setTab("schedule");
-                }}
-              />
-
-              <div className="trip">
-                <div className="trip-rail" aria-hidden>
-                  <span className="dot start" />
-                  <span className="line" />
-                  <span className="dot end" />
-                </div>
-                <div className="trip-fields">
-                  <BuildingSearch
-                    label="From"
-                    hideLabel
-                    placeholder="Start: search or tap the map"
-                    search={campusSearch!}
-                    buildingById={data.buildingById}
-                    placeById={placeById}
-                    classes={schedule.meetings}
-                    onMyLocation={locate}
-                    home={saved.home}
-                    onSetHome={() => startSettingHome("from")}
-                    value={from}
-                    active={clickTarget === "from"}
-                    onFocus={() => {
-                      setClickTarget("from");
-                      // Phones: open the panel so the suggestions have room.
-                      setSheetOpen(true);
-                    }}
-                    onSelect={(e) => {
-                      setFrom(e);
-                      if (e) setClickTarget("to");
-                    }}
-                  />
-                  <BuildingSearch
-                    label="To"
-                    hideLabel
-                    placeholder="Destination: WLH 2001, CSE 11, Geisel…"
-                    search={campusSearch!}
-                    buildingById={data.buildingById}
-                    placeById={placeById}
-                    classes={schedule.meetings}
-                    home={saved.home}
-                    onSetHome={() => startSettingHome("to")}
-                    value={to}
-                    active={clickTarget === "to"}
-                    onFocus={() => {
-                      setClickTarget("to");
-                      // Phones: open the panel so the suggestions have room.
-                      setSheetOpen(true);
-                    }}
-                    onSelect={setTo}
-                  />
-                </div>
-                <div className="trip-actions">
-                  <button
-                    className="icon-btn"
-                    onClick={locate}
-                    disabled={locating}
-                    aria-label="Start from my location"
-                    title="Start from my location"
-                  >
-                    <LocateIcon />
-                  </button>
-                  <button
-                    className="icon-btn"
-                    onClick={() => {
-                      setFromRaw(to);
-                      setToRaw(from);
-                    }}
-                    disabled={!from && !to}
-                    aria-label="Swap start and destination"
-                    title="Swap"
-                  >
-                    <SwapIcon />
-                  </button>
-                </div>
-              </div>
-
-              <div className="modes" role="radiogroup" aria-label="How are you getting there?">
-                {(Object.keys(MODES) as ModeId[]).map((id) => {
-                  const Icon = MODE_ICONS[id];
-                  const option = options[id];
-                  const eta = option.unavailable || !option.plan?.ok ? null : Math.max(1, Math.ceil(option.plan.route.minutes));
-                  const fare =
-                    id === "bus" && eta !== null && option.plan?.ok
-                      ? tripFare(option.plan.route, data.transit.data.fares, { upass })
-                      : null;
-                  return (
-                    <button
-                      key={id}
-                      role="radio"
-                      aria-checked={mode === id}
-                      className={mode === id ? "on" : ""}
-                      disabled={!!option.unavailable}
-                      title={option.unavailable ?? undefined}
-                      onClick={() => setMode(id)}
-                    >
-                      <Icon />
-                      <span className="mode-label">{MODES[id].label}</span>
-                      {from && to && <span className="mode-eta">{eta === null ? "—" : `${eta} min`}</span>}
-                      {fare && <span className="mode-fare">{formatFare(fare.total)}</span>}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {dining && menus && <DiningMenu menus={menus} match={dining} />}
-              <TimingControl value={timing} onChange={setTiming} />
-              {arriveBy?.label && (
-                <p className="note">
-                  Arriving by <strong>{formatTime(arriveBy.at)}</strong> for {arriveBy.label}.{" "}
-                  <button className="link" onClick={() => setArriveBy(null)}>
-                    Leave now instead
-                  </button>
-                </p>
+              {chatCampus && (
+                <MyClasses campus={chatCampus} onGo={(course) => chat.current?.run(`Take me to ${course}`, (a) => a.goToCourse(course))} />
               )}
               {hint && <p className="note warn-note">{hint}</p>}
-              {settingHome && (
-                <div className="set-home" role="status" ref={(el) => el?.scrollIntoView({ block: "nearest" })}>
-                  <span>
-                    <strong>Set your home:</strong> tap it on the map.
-                  </span>
-                  <span className="form-row">
-                    <button onClick={homeFromLocation}>Use my location</button>
-                    <button className="link" onClick={() => setSettingHome(null)}>
-                      Cancel
-                    </button>
-                  </span>
-                </div>
-              )}
-              {mode === "bus" && busUnavailable && <p className="note warn-note">{busUnavailable} Showing the walk.</p>}
-              {mode === "bus" && !busUnavailable && transitOpts.length > 0 && data && (
-                <TransitPanel
-                  options={transitOpts}
-                  selected={selectedOption}
-                  onSelect={setSelectedOption}
-                  stepFree={transitStepFree}
-                  onStepFree={setTransitStepFree}
-                  transit={data.transit}
-                  fares={data.transit.data.fares}
-                  upass={upass}
-                  arriving={!!arriveBy}
-                />
-              )}
-              {mode === "accessible" && noStairsUnavailable && (
-                <p className="note warn-note">There's no step-free route to this destination. Showing the route with stairs.</p>
-              )}
-              {mode === "scooter" && scooterUnavailable && (
-                <p className="note warn-note">{scooterUnavailable} Showing the walk.</p>
-              )}
-              {mode === "scooter" && !scooterUnavailable && !scooterResult && from && to && <p className="note">Finding a free Spin scooter…</p>}
-              {mode === "scooter" && scooterTrip && walkPlan?.ok && walkPlan.route.seconds <= scooterTrip.route.seconds && (
-                <p className="note">
-                  Walking is quicker here ({Math.max(1, Math.ceil(walkPlan.route.minutes))} min).{" "}
-                  <button className="link" onClick={() => setMode("walk")}>
-                    Walk instead
-                  </button>
-                </p>
-              )}
-              {plan && !plan.ok && !busSuggestion && <p className="note warn-note">{plan.error}</p>}
-              {busSuggestion && (
-                <div className="suggest">
-                  <BusIcon />
-                  <span>
-                    {busSuggestion.savedMin === null
-                      ? "Only reachable by transit from here."
-                      : arriveBy
-                        ? `Transit lets you leave ${busSuggestion.savedMin} min later`
-                        : `Transit gets you there ${busSuggestion.savedMin} min sooner`}
-                    <span className="muted"> · {busName(busSuggestion.route)}</span>
-                  </span>
-                  <button onClick={() => setMode("bus")}>Take it</button>
-                </div>
-              )}
               {openStop && (
                 <StopPanel
                   stop={openStop}
@@ -1168,99 +906,324 @@ export function App() {
                   }}
                 />
               )}
-              {route && to && !openStop && (
-                <>
-                  <Itinerary
-                    route={route}
-                    destination={endpointLabel(to)}
-                    showLeave={timing.kind !== "now"}
-                    fare={tripFare(route, data.transit.data.fares, { upass })}
-                    upass={upass}
-                    onUpass={setUpass}
-                    scooter={mode === "scooter" ? scooterTrip : null}
-                    onStopClick={(s) => {
-                      setOpenStop(s);
-                      setSheetOpen(true);
-                      setFocus({ at: s.lngLat, zoom: 17.2, key: Date.now() });
-                    }}
-                  />
-                  <button
-                    className="primary start"
-                    onClick={() => {
-                      setNavigating(true);
-                      setSheetOpen(false);
-                    }}
-                  >
-                    Start
-                  </button>
-                  {insideCard}
-                  <div className="route-actions">
-                    <button onClick={() => setNaming((v) => !v)} aria-expanded={naming}>
-                      <StarIcon /> Save place
-                    </button>
-                    <button
-                      disabled={isHome(to)}
-                      onClick={() => saved.setHome(to.kind === "place" ? to.place.points : [endpointPosition(to)])}
-                    >
-                      <HomeIcon /> {isHome(to) ? "Your home" : "Set as home"}
-                    </button>
-                    <button onClick={() => openReport(true)}>
-                      <FlagIcon /> Report
-                    </button>
+              {/* The trip the chat (or Advanced) set up: how to get there, and Start. */}
+              {from && to && !openStop && (
+                <section className="trip-result" aria-label="Your trip">
+                  <p className="trip-route">
+                    <span className="muted">From</span> {endpointLabel(from)} <span className="muted">to</span> <strong>{endpointLabel(to)}</strong>
+                  </p>
+                  {arriveBy?.label && (
+                    <p className="note">
+                      Arriving by <strong>{formatTime(arriveBy.at)}</strong> for {arriveBy.label}.{" "}
+                      <button className="link" onClick={() => setArriveBy(null)}>
+                        Leave now instead
+                      </button>
+                    </p>
+                  )}
+                  <div className="modes" role="radiogroup" aria-label="How are you getting there?">
+                    {(Object.keys(MODES) as ModeId[]).map((id) => {
+                      const Icon = MODE_ICONS[id];
+                      const option = options[id];
+                      const eta = option.unavailable || !option.plan?.ok ? null : Math.max(1, Math.ceil(option.plan.route.minutes));
+                      const fare =
+                        id === "bus" && eta !== null && option.plan?.ok
+                          ? tripFare(option.plan.route, data.transit.data.fares, { upass })
+                          : null;
+                      return (
+                        <button
+                          key={id}
+                          role="radio"
+                          aria-checked={mode === id}
+                          className={mode === id ? "on" : ""}
+                          disabled={!!option.unavailable}
+                          title={option.unavailable ?? undefined}
+                          onClick={() => setMode(id)}
+                        >
+                          <Icon />
+                          <span className="mode-label">{MODES[id].label}</span>
+                          {from && to && <span className="mode-eta">{eta === null ? "—" : `${eta} min`}</span>}
+                          {fare && <span className="mode-fare">{formatFare(fare.total)}</span>}
+                        </button>
+                      );
+                    })}
                   </div>
-                  {naming && (
-                    <PlaceNamer
-                      key={endpointLabel(to)}
-                      at={endpointPosition(to)}
-                      defaultName={to.kind === "point" ? "" : endpointLabel(to)}
-                      onSave={(name, note) => saved.add(name, to.kind === "place" ? to.place.points : [endpointPosition(to)], note)}
-                      onClose={() => setNaming(false)}
+                  {mode === "bus" && busUnavailable && <p className="note warn-note">{busUnavailable} Showing the walk.</p>}
+                  {mode === "bus" && !busUnavailable && transitOpts.length > 0 && data && (
+                    <TransitPanel
+                      options={transitOpts}
+                      selected={selectedOption}
+                      onSelect={setSelectedOption}
+                      stepFree={transitStepFree}
+                      onStepFree={setTransitStepFree}
+                      transit={data.transit}
+                      fares={data.transit.data.fares}
+                      upass={upass}
+                      arriving={!!arriveBy}
                     />
                   )}
-                </>
-              )}
-              {!to && (saved.places.length > 0 || !saved.home) && (
-                <div className="saved-places" aria-label="Your places">
-                  {!saved.home && (
-                    <span className="place-chip">
-                      <button onClick={() => startSettingHome("to")}>
-                        <HomeIcon /> Set home
-                      </button>
-                    </span>
+                  {mode === "accessible" && noStairsUnavailable && (
+                    <p className="note warn-note">There's no step-free route to this destination. Showing the route with stairs.</p>
                   )}
-                  {saved.places.map((p) => (
-                    <span key={p.id} className="place-chip">
-                      <button onClick={() => setTo({ kind: "place", place: p })}>
-                        {p.id === HOME_ID && <HomeIcon />} {p.name}
+                  {mode === "scooter" && scooterUnavailable && (
+                    <p className="note warn-note">{scooterUnavailable} Showing the walk.</p>
+                  )}
+                  {mode === "scooter" && !scooterUnavailable && !scooterResult && from && to && <p className="note">Finding a free Spin scooter…</p>}
+                  {mode === "scooter" && scooterTrip && walkPlan?.ok && walkPlan.route.seconds <= scooterTrip.route.seconds && (
+                    <p className="note">
+                      Walking is quicker here ({Math.max(1, Math.ceil(walkPlan.route.minutes))} min).{" "}
+                      <button className="link" onClick={() => setMode("walk")}>
+                        Walk instead
                       </button>
-                      <button className="icon-btn" aria-label={`Forget ${p.name}`} onClick={() => saved.remove(p.id)}>
-                        <CloseIcon />
+                    </p>
+                  )}
+                  {plan && !plan.ok && !busSuggestion && <p className="note warn-note">{plan.error}</p>}
+                  {busSuggestion && (
+                    <div className="suggest">
+                      <BusIcon />
+                      <span>
+                        {busSuggestion.savedMin === null
+                          ? "Only reachable by transit from here."
+                          : arriveBy
+                            ? `Transit lets you leave ${busSuggestion.savedMin} min later`
+                            : `Transit gets you there ${busSuggestion.savedMin} min sooner`}
+                        <span className="muted"> · {busName(busSuggestion.route)}</span>
+                      </span>
+                      <button onClick={() => setMode("bus")}>Take it</button>
+                    </div>
+                  )}
+                  {route && (
+                    <>
+                      <Itinerary
+                        route={route}
+                        destination={endpointLabel(to)}
+                        showLeave={timing.kind !== "now"}
+                        fare={tripFare(route, data.transit.data.fares, { upass })}
+                        upass={upass}
+                        onUpass={setUpass}
+                        scooter={mode === "scooter" ? scooterTrip : null}
+                        onStopClick={(s) => {
+                          setOpenStop(s);
+                          setSheetOpen(true);
+                          setFocus({ at: s.lngLat, zoom: 17.2, key: Date.now() });
+                        }}
+                      />
+                      {dining && menus && <DiningMenu menus={menus} match={dining} />}
+                      <button
+                        className="primary start"
+                        onClick={() => {
+                          setNavigating(true);
+                          setSheetOpen(false);
+                        }}
+                      >
+                        Start
                       </button>
-                    </span>
-                  ))}
+                      {insideCard}
+                    </>
+                  )}
+                </section>
+              )}
+
+              {/* Everything you'd do by hand: hidden until you want it. */}
+              <details className="advanced" open={advanced} onToggle={(e) => setAdvanced(e.currentTarget.open)}>
+                <summary>Advanced</summary>
+                <div className="advanced-body">
+                  <h3>Plan a trip by hand</h3>
+                  <div className="trip">
+                    <div className="trip-rail" aria-hidden>
+                      <span className="dot start" />
+                      <span className="line" />
+                      <span className="dot end" />
+                    </div>
+                    <div className="trip-fields">
+                      <BuildingSearch
+                        label="From"
+                        hideLabel
+                        placeholder="Start: search or tap the map"
+                        search={campusSearch!}
+                        buildingById={data.buildingById}
+                        placeById={placeById}
+                        onMyLocation={locate}
+                        home={saved.home}
+                        onSetHome={() => startSettingHome("from")}
+                        value={from}
+                        active={clickTarget === "from"}
+                        onFocus={() => {
+                          setClickTarget("from");
+                          // Phones: open the panel so the suggestions have room.
+                          setSheetOpen(true);
+                        }}
+                        onSelect={(e) => {
+                          setFrom(e);
+                          if (e) setClickTarget("to");
+                        }}
+                      />
+                      <BuildingSearch
+                        label="To"
+                        hideLabel
+                        placeholder="Destination: WLH 2001, CSE 11, Geisel…"
+                        search={campusSearch!}
+                        buildingById={data.buildingById}
+                        placeById={placeById}
+                        home={saved.home}
+                        onSetHome={() => startSettingHome("to")}
+                        value={to}
+                        active={clickTarget === "to"}
+                        onFocus={() => {
+                          setClickTarget("to");
+                          // Phones: open the panel so the suggestions have room.
+                          setSheetOpen(true);
+                        }}
+                        onSelect={setTo}
+                      />
+                    </div>
+                    <div className="trip-actions">
+                      <button
+                        className="icon-btn"
+                        onClick={locate}
+                        disabled={locating}
+                        aria-label="Start from my location"
+                        title="Start from my location"
+                      >
+                        <LocateIcon />
+                      </button>
+                      <button
+                        className="icon-btn"
+                        onClick={() => {
+                          setFromRaw(to);
+                          setToRaw(from);
+                        }}
+                        disabled={!from && !to}
+                        aria-label="Swap start and destination"
+                        title="Swap"
+                      >
+                        <SwapIcon />
+                      </button>
+                    </div>
+                  </div>
+                  {!(from && to) && (
+                    <div className="modes" role="radiogroup" aria-label="How are you getting there?">
+                      {(Object.keys(MODES) as ModeId[]).map((id) => {
+                        const Icon = MODE_ICONS[id];
+                        const option = options[id];
+                        const eta = option.unavailable || !option.plan?.ok ? null : Math.max(1, Math.ceil(option.plan.route.minutes));
+                        const fare =
+                          id === "bus" && eta !== null && option.plan?.ok
+                            ? tripFare(option.plan.route, data.transit.data.fares, { upass })
+                            : null;
+                        return (
+                          <button
+                            key={id}
+                            role="radio"
+                            aria-checked={mode === id}
+                            className={mode === id ? "on" : ""}
+                            disabled={!!option.unavailable}
+                            title={option.unavailable ?? undefined}
+                            onClick={() => setMode(id)}
+                          >
+                            <Icon />
+                            <span className="mode-label">{MODES[id].label}</span>
+                            {from && to && <span className="mode-eta">{eta === null ? "—" : `${eta} min`}</span>}
+                            {fare && <span className="mode-fare">{formatFare(fare.total)}</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <TimingControl value={timing} onChange={setTiming} />
+                  {settingHome && (
+                    <div className="set-home" role="status" ref={(el) => el?.scrollIntoView({ block: "nearest" })}>
+                      <span>
+                        <strong>Set your home:</strong> tap it on the map.
+                      </span>
+                      <span className="form-row">
+                        <button onClick={homeFromLocation}>Use my location</button>
+                        <button className="link" onClick={() => setSettingHome(null)}>
+                          Cancel
+                        </button>
+                      </span>
+                    </div>
+                  )}
+                  {!to && (saved.places.length > 0 || !saved.home) && (
+                    <div className="saved-places" aria-label="Your places">
+                      {!saved.home && (
+                        <span className="place-chip">
+                          <button onClick={() => startSettingHome("to")}>
+                            <HomeIcon /> Set home
+                          </button>
+                        </span>
+                      )}
+                      {saved.places.map((p) => (
+                        <span key={p.id} className="place-chip">
+                          <button onClick={() => setTo({ kind: "place", place: p })}>
+                            {p.id === HOME_ID && <HomeIcon />} {p.name}
+                          </button>
+                          <button className="icon-btn" aria-label={`Forget ${p.name}`} onClick={() => saved.remove(p.id)}>
+                            <CloseIcon />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {route && to && (
+                    <>
+                      <h3>This destination</h3>
+                      <div className="route-actions">
+                        <button onClick={() => setNaming((v) => !v)} aria-expanded={naming}>
+                          <StarIcon /> Save place
+                        </button>
+                        <button
+                          disabled={isHome(to)}
+                          onClick={() => saved.setHome(to.kind === "place" ? to.place.points : [endpointPosition(to)])}
+                        >
+                          <HomeIcon /> {isHome(to) ? "Your home" : "Set as home"}
+                        </button>
+                        <button onClick={() => openReport(true)}>
+                          <FlagIcon /> Report
+                        </button>
+                      </div>
+                      {naming && (
+                        <PlaceNamer
+                          key={endpointLabel(to)}
+                          at={endpointPosition(to)}
+                          defaultName={to.kind === "point" ? "" : endpointLabel(to)}
+                          onSave={(name, note) => saved.add(name, to.kind === "place" ? to.place.points : [endpointPosition(to)], note)}
+                          onClose={() => setNaming(false)}
+                        />
+                      )}
+                    </>
+                  )}
+                  <h3>On the map</h3>
+                  <div className="map-toggles">
+                    <MapLayersMenu
+                      baseMap={baseMap}
+                      onBaseMap={setBaseMap}
+                      places={campusPlaces}
+                      categories={placeCategories}
+                      onCategories={setPlaceCategories}
+                      nearYou={!!here}
+                    />
+                    <SpinButton on={spinOn} loading={spinLoading} onToggle={() => setSpinOn((v) => !v)} />
+                    <StopsButton
+                      on={showTransitStops}
+                      onToggle={() =>
+                        setShowTransitStops((v) => {
+                          if (v) setOpenStop(null);
+                          return !v;
+                        })
+                      }
+                    />
+                    <LiveTransitButton mode="trolley" on={liveModes.trolley} loading={liveLoading && liveModes.trolley} onToggle={() => toggleLive("trolley")} />
+                    <LiveTransitButton mode="bus" on={liveModes.bus} loading={liveLoading && liveModes.bus} onToggle={() => toggleLive("bus")} />
+                  </div>
+                  <p className="credits">
+                    © OpenStreetMap, UC San Diego Campus Map, Triton Transit and MTS schedules. Unofficial.{" "}
+                    <button className="link" onClick={() => openReport(false)}>
+                      Report a problem
+                    </button>
+                  </p>
                 </div>
-              )}
-              {!from && !to && (
-                <p className="muted small empty-hint">
-                  Pick a start and a destination (buildings, rooms like CENTR 115, or places like “Revelle bus stop”), or add your classes
-                  in Schedule.
-                </p>
-              )}
+              </details>
             </>
-          ) : tab === "schedule" ? (
-            <SchedulePanel
-              data={data}
-              schedule={schedule}
-              view={scheduleView}
-              onView={setScheduleView}
-              estimateBetween={estimateBetween}
-              onDirections={onDirections}
-              onDayOverlay={setDayOverlay}
-              home={saved.home?.points[0] ?? null}
-              estimateHome={estimateHome}
-              onDirectionsHome={onDirectionsHome}
-              onSetHome={() => startSettingHome("from")}
-            />
           ) : (
             <>
               <button className="link back-link" onClick={() => setTab("go")}>
@@ -1277,15 +1240,12 @@ export function App() {
           )}
         </div>
 
-        <footer className="sheet-foot">
-          <span>© OpenStreetMap · UC San Diego Campus Map · Triton Transit &amp; MTS schedules · Unofficial</span>
-          {tab !== "report" && !navigating && (
-            <button className="link" onClick={() => openReport(false)}>
-              Report a problem
-            </button>
-          )}
-        </footer>
       </aside>
+    </div>
+    {/* Hidden, not removed, while navigating: the conversation stays. */}
+    <div className="chatbar-slot" hidden={navigating}>
+      <ChatBar ref={chat} campus={chatCampus} location={chatLocation} vehicles={() => liveRef.current?.vehicles ?? []} view={chatView} />
+    </div>
     </div>
   );
 }

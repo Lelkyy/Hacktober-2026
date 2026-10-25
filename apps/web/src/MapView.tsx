@@ -1,4 +1,6 @@
 import {
+  batteryColor,
+  clusterVehicles,
   haversine,
   type CampusGraph,
   type LiveVehicle,
@@ -6,6 +8,7 @@ import {
   type ParkingSpot,
   type RideZone,
   type SharedBike,
+  type VehicleCluster,
   type TransitStop,
   type TripAhead,
 } from "@campus/core";
@@ -18,7 +21,6 @@ import {
   Marker,
   NavigationControl,
   Popup,
-  ScaleControl,
   setWorkerUrl,
   type ExpressionSpecification,
   type GeoJSONSource,
@@ -96,18 +98,9 @@ registerIllustratedTiles();
 
 const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
-/** A day's classes on the map: the walks between them, and a numbered pin per class. */
-export interface DayOverlay {
-  lines: { coordinates: LngLat[]; color: string }[];
-  /** One pin per building; `n` lists the class numbers there ("1, 4"), `label` one line per class. */
-  stops: { lngLat: LngLat; n: string; label: string; color: string }[];
-}
-
 export interface MapViewProps {
   graph: CampusGraph;
   routeLines: RouteLine[] | null;
-  /** The day view's walks and classes (drawn instead of a route). */
-  day?: DayOverlay | null;
   connectors: [LngLat, LngLat][];
   stops: TransitStop[];
   showStops: boolean;
@@ -209,7 +202,6 @@ export function MapView(props: MapViewProps) {
     });
     map.addControl(geolocate, "top-right");
     geolocate.on("geolocate", (pos) => callbacks.current.onLocate([pos.coords.longitude, pos.coords.latitude]));
-    map.addControl(new ScaleControl({ unit: "imperial" }), "bottom-right");
 
     markers.current = {
       from: new Marker({ color: PALETTE.sageDeep }),
@@ -277,7 +269,7 @@ export function MapView(props: MapViewProps) {
       });
       for (const layer of UCSD_LAYERS) map.addLayer({ ...layer, layout: { ...layer.layout, visibility: "none" } } as unknown as LayerSpecification);
 
-      for (const id of ["route", "connectors", "stops", "doors", "day", "places", "spin", "vehicle-ahead", "stop-routes", "scooter-rules", "scooter-trip"]) {
+      for (const id of ["route", "connectors", "stops", "doors", "places", "spin", "vehicle-ahead", "stop-routes", "scooter-rules", "scooter-trip"]) {
         map.addSource(id, { type: "geojson", data: EMPTY });
       }
       // UCSD's places, under everything of the app's; names once zoomed in.
@@ -594,50 +586,6 @@ export function MapView(props: MapViewProps) {
         layout: { "line-cap": "round", "line-join": "round" },
         paint: { "line-color": ["get", "color"], "line-width": 7, "line-offset": KEEP_RIGHT_OFFSET },
       });
-      // The day view: dotted walks between classes in the next class's color, numbered pins.
-      map.addLayer({
-        id: "day-line",
-        type: "line",
-        source: "day",
-        filter: ["==", ["geometry-type"], "LineString"],
-        layout: { "line-cap": "round", "line-join": "round" },
-        paint: { "line-color": ["get", "color"], "line-width": 6, "line-dasharray": [0.01, 1.6] },
-      });
-      map.addLayer({
-        id: "day-stop",
-        type: "circle",
-        source: "day",
-        filter: ["==", ["geometry-type"], "Point"],
-        paint: {
-          "circle-radius": ["case", [">", ["length", ["get", "n"]], 1], 15, 11],
-          "circle-color": ["get", "color"],
-          "circle-stroke-color": PALETTE.white,
-          "circle-stroke-width": 2.5,
-        },
-      });
-      map.addLayer({
-        id: "day-stop-n",
-        type: "symbol",
-        source: "day",
-        filter: ["==", ["geometry-type"], "Point"],
-        layout: { "text-field": ["get", "n"], "text-font": ["Noto Sans Regular"], "text-size": 11, "text-allow-overlap": true },
-        paint: { "text-color": PALETTE.white },
-      });
-      map.addLayer({
-        id: "day-stop-label",
-        type: "symbol",
-        source: "day",
-        filter: ["==", ["geometry-type"], "Point"],
-        layout: {
-          "text-field": ["get", "label"],
-          "text-font": ["Noto Sans Regular"],
-          "text-size": 12,
-          "text-offset": [0, 1.5],
-          "text-anchor": "top",
-          "text-optional": true,
-        },
-        paint: { "text-color": PALETTE.ink, "text-halo-color": PALETTE.white, "text-halo-width": 1.6 },
-      });
       map.addLayer({
         id: "doors",
         type: "circle",
@@ -666,29 +614,6 @@ export function MapView(props: MapViewProps) {
     });
 
     map.on("click", (e) => {
-      // A Spin e-bike: its battery and range, and directions to it.
-      const box: [[number, number], [number, number]] = [
-        [e.point.x - 8, e.point.y - 8],
-        [e.point.x + 8, e.point.y + 8],
-      ];
-      const bike = map.getLayer("spin") ? map.queryRenderedFeatures(box, { layers: ["spin"] })[0] : undefined;
-      if (bike && bike.geometry.type === "Point") {
-        selected.current = null;
-        ahead.current = null;
-        setFocusRouteRef.current(null);
-        if (map.getSource("vehicle-ahead")) source(map, "vehicle-ahead").setData(EMPTY);
-        callbacks.current.onClearOverlay?.();
-        const at = bike.geometry.coordinates as LngLat;
-        popup.current?.remove();
-        popup.current = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup" })
-          .setLngLat(at)
-          .setDOMContent(placeCard((bike.properties as { name: string }).name, (bike.properties as { detail: string }).detail, "", "", () => {
-            popup.current?.remove();
-            callbacks.current.onPlaceDirections({ lngLat: at, name: (bike.properties as { name: string }).name });
-          }))
-          .addTo(map);
-        return;
-      }
       // A place: what it is, and directions to it; anywhere else drops a pin as before.
       const hit = map.getLayer("places")
         ? map.queryRenderedFeatures([
@@ -737,8 +662,14 @@ export function MapView(props: MapViewProps) {
       map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
       map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
     }
+    // The chat bar under the map grows and shrinks with the conversation.
+    const resize = new ResizeObserver(() => map.resize());
+    resize.observe(container.current!);
 
-    return () => map.remove();
+    return () => {
+      resize.disconnect();
+      map.remove();
+    };
   }, []);
 
   useEffect(() => {
@@ -1027,46 +958,88 @@ export function MapView(props: MapViewProps) {
         : [],
     });
   }, [ready, props.scooterRules]);
+  const tripMarkers = useRef<Marker[]>([]);
   useEffect(() => {
     if (!ready) return;
+    const map = mapRef.current!;
+    for (const m of tripMarkers.current) m.remove();
+    tripMarkers.current = [];
+    source(map, "scooter-trip").setData(EMPTY);
     const t = props.scooterTrip;
-    source(mapRef.current!, "scooter-trip").setData({
-      type: "FeatureCollection",
-      features: t
-        ? [
-            { type: "Feature", properties: { role: "scooter", label: "Spin scooter" }, geometry: { type: "Point", coordinates: t.scooter } },
-            { type: "Feature", properties: { role: "park", label: "Park here" }, geometry: { type: "Point", coordinates: t.parking.lngLat } },
-          ]
-        : [],
+    if (!t) return;
+    const close = haversine(t.scooter[0], t.scooter[1], t.parking.lngLat[0], t.parking.lngLat[1]) < 22;
+    const park = document.createElement("button");
+    park.type = "button";
+    park.className = "spin-park";
+    park.textContent = "P";
+    park.title = "Park here";
+    park.setAttribute("aria-label", "Park the scooter here");
+    const parked = new Marker({ element: park, anchor: "center", offset: close ? [22, -16] : [0, 0] }).setLngLat(t.parking.lngLat).addTo(map);
+    // The fleet pins already show the scooter. A second icon on the same spot covers the P.
+    if (props.spinBikes) {
+      tripMarkers.current = [parked];
+      return;
+    }
+    const pickup = spinMarkerElement({
+      kind: "scooter",
+      lngLat: t.scooter,
+      count: 1,
+      vehicle: { id: "trip", kind: "scooter", lngLat: t.scooter },
     });
-  }, [ready, props.scooterTrip]);
+    pickup.title = "Spin scooter";
+    tripMarkers.current = [parked, new Marker({ element: pickup, anchor: "center" }).setLngLat(t.scooter).addTo(map)];
+  }, [ready, props.scooterTrip, props.spinBikes]);
 
-  // Spin vehicles: every e-bike and scooter free to ride (not just the nearest few, unlike places).
+  // Spin vehicles: ones a few meters apart share one pin (GPS spread), colored by the fullest battery.
+  const spinMarkers = useRef(new Map<string, Marker>());
   useEffect(() => {
-    if (!ready) return;
-    // Scooters first, so e-bikes draw on top.
-    const all = [...(props.spinBikes ?? [])].sort((a, b) => Number(a.kind === "ebike") - Number(b.kind === "ebike"));
-    source(mapRef.current!, "spin").setData({
-      type: "FeatureCollection",
-      features: all.map((b) => {
-        const m = anchor ? haversine(anchor[0], anchor[1], b.lngLat[0], b.lngLat[1]) : NaN;
-        const battery = b.battery !== undefined ? `${Math.round(b.battery * 100)}% battery` : "";
-        const range = b.rangeMeters !== undefined ? `about ${(b.rangeMeters / 1609).toFixed(0)} mi of range` : "";
-        const away = Number.isFinite(m) ? `${formatDistance(m)} from ${props.userPos ? "you" : "the map's middle"}` : "";
-        return {
-          type: "Feature",
-          properties: {
-            kind: b.kind,
-            name: b.kind === "ebike" ? "Spin e-bike" : "Spin scooter",
-            label: b.battery !== undefined ? `${Math.round(b.battery * 100)}%` : "",
-            detail: [battery, range, away].filter(Boolean).join(" · "),
-          },
-          geometry: { type: "Point", coordinates: b.lngLat },
-        };
-      }),
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    source(map, "spin").setData(EMPTY);
+    const markers = spinMarkers.current;
+    if (!props.spinBikes) {
+      for (const m of markers.values()) m.remove();
+      markers.clear();
+      return;
+    }
+    const clusters = clusterVehicles(props.spinBikes).filter((c) => {
+      const p = map.project(c.lngLat);
+      const canvas = map.getCanvas();
+      return p.x >= -40 && p.y >= -40 && p.x <= canvas.clientWidth + 40 && p.y <= canvas.clientHeight + 40;
     });
-    if (!props.spinBikes) popup.current?.remove();
-  }, [ready, props.spinBikes, anchor?.[0], anchor?.[1], props.userPos]);
+    const keep = new Set(clusters.map((c) => c.vehicle.id));
+    for (const [id, m] of markers) if (!keep.has(id)) (m.remove(), markers.delete(id));
+    for (const cluster of clusters) {
+      markers.get(cluster.vehicle.id)?.remove();
+      const el = spinMarkerElement(cluster);
+      const away = anchor ? haversine(anchor[0], anchor[1], cluster.lngLat[0], cluster.lngLat[1]) : NaN;
+      const pct = cluster.battery !== undefined ? `${Math.round(cluster.battery * 100)}% battery` : "";
+      const range = cluster.vehicle.rangeMeters !== undefined ? `about ${(cluster.vehicle.rangeMeters / 1609).toFixed(0)} mi of range` : "";
+      const where = Number.isFinite(away) ? `${formatDistance(away)} from ${props.userPos ? "you" : "the map's middle"}` : "";
+      const noun = cluster.kind === "ebike" ? "e-bike" : "scooter";
+      const name = cluster.count > 1 ? `Best Spin ${noun} here` : cluster.kind === "ebike" ? "Spin e-bike" : "Spin scooter";
+      const detail = [cluster.count > 1 ? `${cluster.count - 1} more beside it` : "", pct, range, where].filter(Boolean).join(" · ");
+      el.title = name;
+      el.setAttribute("aria-label", name);
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        selected.current = null;
+        ahead.current = null;
+        setFocusRoute(null);
+        if (map.getSource("vehicle-ahead")) source(map, "vehicle-ahead").setData(EMPTY);
+        callbacks.current.onClearOverlay?.();
+        popup.current?.remove();
+        popup.current = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup" })
+          .setLngLat(cluster.lngLat)
+          .setDOMContent(placeCard(name, detail, "", "", () => {
+            popup.current?.remove();
+            callbacks.current.onPlaceDirections({ lngLat: cluster.vehicle.lngLat, name });
+          }))
+          .addTo(map);
+      });
+      markers.set(cluster.vehicle.id, new Marker({ element: el, anchor: "center" }).setLngLat(cluster.lngLat).addTo(map));
+    }
+  }, [ready, props.spinBikes, anchor?.[0], anchor?.[1], props.userPos, viewMoved]);
 
   useEffect(() => {
     if (!ready) return;
@@ -1138,33 +1111,6 @@ export function MapView(props: MapViewProps) {
       markers.clear();
     };
   }, [ready, props.logoStops, props.showTransitStops, props.selectedStopId, focusRoute, viewMoved]);
-
-  // The day view's walks and pins, framed whenever the day (or the choice of classes) changes.
-  const lastDay = useRef("");
-  useEffect(() => {
-    if (!ready) return;
-    const map = mapRef.current!;
-    const day = props.day;
-    source(map, "day").setData({
-      type: "FeatureCollection",
-      features: [
-        ...(day?.lines ?? []).map((l) => ({ ...lineFeature(l.coordinates), properties: { color: l.color } })),
-        ...(day?.stops ?? []).map((s) => ({
-          type: "Feature" as const,
-          properties: { n: s.n, label: s.label, color: s.color },
-          geometry: { type: "Point" as const, coordinates: s.lngLat },
-        })),
-      ],
-    });
-    const pts = [...(day?.lines ?? []).flatMap((l) => l.coordinates), ...(day?.stops ?? []).map((s) => s.lngLat)];
-    const key = JSON.stringify(day?.stops.map((s) => s.lngLat) ?? []);
-    if (pts.length && key !== lastDay.current) {
-      const bounds = new LngLatBounds(pts[0], pts[0]);
-      for (const p of pts) bounds.extend(p);
-      map.fitBounds(bounds, { padding: fitPadding(), maxZoom: 17.5, duration: 600 });
-    }
-    lastDay.current = key;
-  }, [ready, props.day]);
 
   useEffect(() => {
     if (!ready) return;
@@ -1281,9 +1227,19 @@ function visibleCenter(at: LngLat, zoom: number): LngLat {
   return [at[0] - (pad.left - pad.right) / 2 / perDeg, at[1] - ((pad.bottom - pad.top) / 2) * (cos / perDeg)];
 }
 
+/** Room around what the map fits: clear of the panel and the chat, wherever they sit. */
 function fitPadding() {
-  if (window.innerWidth > 760) return { top: 60, right: 70, bottom: 60, left: 440 };
-  return { top: 70, right: 40, bottom: Math.round(window.innerHeight * 0.5), left: 40 };
+  const sheet = document.querySelector<HTMLElement>(".sheet")?.getBoundingClientRect();
+  const chat = document.querySelector<HTMLElement>(".chatbar")?.getBoundingClientRect();
+  if (window.innerWidth > 760) {
+    // The panel floats on the left, the chat card along the bottom.
+    const bottom = chat ? window.innerHeight - chat.top + 24 : 60;
+    return { top: 60, right: 70, bottom, left: (sheet?.right ?? 360) + 32 };
+  }
+  // Phones: the panel is a sheet over the bottom of the map (the chat bar is under the map).
+  const app = document.querySelector<HTMLElement>(".app")?.getBoundingClientRect();
+  const covered = sheet && app ? app.bottom - sheet.top : (app?.height ?? window.innerHeight) * 0.4;
+  return { top: 70, right: 40, bottom: Math.round(covered + 24), left: 40 };
 }
 
 /** Your position: a dot with a cone for the way you face (shown once a heading is known). */
@@ -1538,6 +1494,36 @@ function stopsInView<T extends { stop: TransitStop }>(map: MlMap, stops: T[]): T
  */
 function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+}
+
+/** A Spin scooter (or e-bike) colored by battery, with a count when several share the pin. */
+function spinMarkerElement(cluster: VehicleCluster): HTMLElement {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = "spin-pin";
+  const color = batteryColor(cluster.battery);
+  const count = cluster.count > 1 ? `<span class="spin-count">${cluster.count}</span>` : "";
+  const body = cluster.kind === "scooter" ? scooterSvg(color) : bikeSvg(color);
+  el.innerHTML = `${body}${count}`;
+  return el;
+}
+
+function scooterSvg(color: string): string {
+  return `<svg class="spin-glyph" viewBox="0 0 36 22" width="32" height="20" aria-hidden="true">
+    <circle cx="8" cy="17" r="3.4" fill="#1c1c1c" stroke="#fff" stroke-width="1.1"/>
+    <circle cx="28" cy="17" r="3.4" fill="#1c1c1c" stroke="#fff" stroke-width="1.1"/>
+    <path d="M10 16h10l5-9h6" fill="none" stroke="${color}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M20 7h6" fill="none" stroke="${color}" stroke-width="2.4" stroke-linecap="round"/>
+    <rect x="12" y="13.2" width="9" height="2.4" rx="1" fill="${color}"/>
+  </svg>`;
+}
+
+function bikeSvg(color: string): string {
+  return `<svg class="spin-glyph" viewBox="0 0 36 22" width="32" height="20" aria-hidden="true">
+    <circle cx="8" cy="16" r="4.2" fill="none" stroke="${color}" stroke-width="1.8"/>
+    <circle cx="28" cy="16" r="4.2" fill="none" stroke="${color}" stroke-width="1.8"/>
+    <path d="M8 16 L16 7 H22 L28 16 M16 7 L13 16 H20" fill="none" stroke="${color}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
 }
 
 function vehicleElement(v: LiveVehicle): HTMLElement {

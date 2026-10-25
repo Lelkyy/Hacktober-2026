@@ -22,3 +22,8 @@ data/raw/
 data/private/
 apps/web/public/data/sections.json
 .claude/
+
+# BMAD method install. Local agent skills, not part of the app.
+.agents/
+_bmad/
+skills-lock.json
