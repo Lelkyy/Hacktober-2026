@@ -581,6 +581,8 @@ export function App() {
   // The chat bar: the campus as the chat sees it, your location, and what it does to the map.
   const campusPlacesRef = useRef(campusPlaces);
   campusPlacesRef.current = campusPlaces;
+  const menusRef = useRef(menus);
+  menusRef.current = menus;
   const liveRef = useRef(live);
   liveRef.current = live;
   const chatCampus = useMemo<ChatCampus | null>(
@@ -596,6 +598,9 @@ export function App() {
             // Fetched separately (and maybe later): read when asked.
             get mapPoints() {
               return campusPlacesRef.current;
+            },
+            get menus() {
+              return menusRef.current;
             },
           }
         : null,
@@ -617,6 +622,7 @@ export function App() {
       setTiming(trip.arriveBy ? { kind: "arrive", at: trip.arriveBy, label: trip.name } : { kind: "now" });
     },
     markers: (_points, category) => setPlaceCategories((on) => (on.includes(category) ? on : [...on, category])),
+    food: (hall) => setFoodHall(hall),
     stop: (ids, at) => {
       const stop = data?.transit.data.stops.find((s) => s.id === ids[0]);
       if (!stop) return;

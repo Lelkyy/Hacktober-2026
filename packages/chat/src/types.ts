@@ -7,6 +7,7 @@ import type {
   SectionsData,
   TransitNetwork,
 } from "@campus/core";
+import type { ScrapedMenus } from "./menus.ts";
 
 /** The campus data the chat needs. Each app passes its own (the simple app's Campus, the full app's CampusData). */
 export interface ChatCampus {
@@ -22,6 +23,8 @@ export interface ChatCampus {
   indoor: IndoorData;
   /** Every point on UCSD's campus map: restrooms, water, food, printers, chargers… */
   mapPoints: CampusMapPoints | null;
+  /** Scraped HDH menus, when this app has them. Read when a food question is asked. */
+  menus?: ScrapedMenus | null;
 }
 
 /** Knobs each app sets. */

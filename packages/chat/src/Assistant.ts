@@ -4,6 +4,7 @@ import {
   type SectionMeeting,
   endpointPosition,
   floorPhrase,
+  haversine,
   insideHints,
   MODES,
   type Building,
@@ -21,6 +22,7 @@ import type { ChatModel } from "./ChatModel.ts";
 import type { Intent, TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
 import { explainStatus, findItems, hallNamed, loadMenu, money, prepMinutes, quote } from "./dining.ts";
+import { HALL_PLACE, pricePhrase, recommend, resolveHall, type FoodPick, type ScrapedMenus } from "./menus.ts";
 import { loadMemory, noteFact, saveMemory, type Memory } from "./memory.ts";
 import { nearbyKind, nearest } from "./nearby.ts";
 import { groupOf, nearestStop, stopNamed, stopSummary } from "./stops.ts";
@@ -54,6 +56,8 @@ export interface ChatView {
   markers(points: { lngLat: LngLat; label: string }[], category: string): void;
   /** A stop's lines, and the map moved to it. */
   stop(ids: string[], at: LngLat): void;
+  /** The dining hall a food answer is about, so the menu can open on it. */
+  food?(hall: string): void;
 }
 
 export interface AssistantDeps {
@@ -139,7 +143,7 @@ export class Assistant {
     this.last = intent;
     const noted = this.keep(intent);
     if (intent.mode && intent.action !== "stop") this.explicit = intent.mode;
-    else if (intent.action === "class" || intent.action === "route" || intent.action === "nearby" || intent.action === "next") this.explicit = null;
+    else if (intent.action === "class" || intent.action === "route" || intent.action === "nearby" || intent.action === "next" || intent.action === "order") this.explicit = null;
     const finish = (reply: Reply): Reply =>
       noted.length ? { ...reply, text: `${reply.text}\nI'll remember: ${noted.join("; ")}.` } : reply;
 
@@ -261,7 +265,7 @@ export class Assistant {
       choices: [
         ...(next ? [{ label: `Take me to ${next.course.code}`, pick: () => this.toOption(next, null) }] : []),
         ...examples.map((example) => ({ label: example, pick: () => this.handle(example) })),
-      ].slice(0, 3),
+      ].slice(0, 4),
     };
   }
 
@@ -462,6 +466,8 @@ export class Assistant {
    */
   private async orderFood(intent: Intent, message: string): Promise<Reply> {
     const status = explainStatus(message);
+    const menus = this.campus.menus;
+    if (menus?.items.length) return this.orderFromMenus(intent, message, menus, status);
     const hall = hallNamed(intent.place ?? "") ?? hallNamed(message);
     if (!hall) {
       return {
@@ -504,6 +510,95 @@ export class Assistant {
     this.trip = { to: place, arriveBy: null, title: hall.name, name: hall.name };
     const routed = await this.go();
     return { ...routed, text: `${bill}\n${routed.text}` };
+  }
+
+  /** Recommendations and prices from the scraped menu, then a route to that hall. */
+  private async orderFromMenus(intent: Intent, message: string, menus: ScrapedMenus, status?: string): Promise<Reply> {
+    const hall = resolveHall(intent.place ?? message) ?? resolveHall(message);
+    const ask = {
+      hall,
+      item: intent.item,
+      minPrice: intent.minPrice,
+      maxPrice: intent.maxPrice,
+      maxInclusive: intent.maxInclusive,
+    };
+    const picks = recommend(menus, ask);
+    if (!picks.length) {
+      const range = pricePhrase(intent.minPrice, intent.maxPrice);
+      const where = hall ? ` at ${hall}` : "";
+      const dish = intent.item ? ` matching “${intent.item}”` : "";
+      return {
+        text: `Nothing on today's menu${where}${dish}${range ? ` ${range}` : ""}. Try another hall, or a wider price.`,
+      };
+    }
+    const from = await this.start();
+    if (!from) {
+      const preview = this.foodBill(picks, intent, hall);
+      return this.askWhere(`${preview}\nWhere are you? I'll take you to the closest hall that has it.`, () =>
+        this.orderFromMenus(intent, message, menus, status),
+      );
+    }
+    const chosen = this.closestHall(picks, from);
+    const here = picks.filter((p) => p.hall === chosen);
+    const shown = (here.length ? here : picks).slice(0, 4);
+    const elsewhere = [...new Set(picks.filter((p) => p.hall !== chosen).map((p) => p.hall))];
+    let bill = this.foodBill(shown, intent, chosen);
+    if (elsewhere.length) bill += `\nAlso in range: ${elsewhere.slice(0, 3).join(", ")}.`;
+    if (status) bill += ` ${status}`;
+    if (/triton2\s?go|\bbox\b/i.test(message)) {
+      bill += ` A Triton2Go box is a $5 refundable deposit unless it's a drink, pizza, burrito, wrap, sandwich, or pastry. Only "Pick up" or "Ready now" means it's ready.`;
+    }
+    const place = this.placeFor(chosen);
+    this.view.food?.(chosen);
+    if (!place) return { text: bill };
+    this.trip = { to: place, arriveBy: null, title: chosen, name: chosen, notes: [] };
+    const routed = await this.go();
+    return { ...routed, text: `${bill}\n${routed.text}` };
+  }
+
+  private foodBill(picks: FoodPick[], intent: Intent, hall?: string): string {
+    const range = pricePhrase(intent.minPrice, intent.maxPrice);
+    const open = picks.some((p) => p.open);
+    const head = hall && picks.every((p) => p.hall === hall) ? hall : "Dining";
+    const lines = picks.map((p) => {
+      const price = p.price != null ? money(p.price) : "no price listed";
+      const when = p.open && p.hours && p.hours !== "Closed" ? `open ${p.hours}` : "closed now";
+      const where = hall && p.hall === hall ? p.station : `${p.station} at ${p.hall}`;
+      return `• ${p.name} — ${where}, ${price}, ${when}`;
+    });
+    const lead = `${head}${range ? `, ${range}` : ""}${open ? ", open now" : ""}:`;
+    return `${lead}\n${lines.join("\n")}`;
+  }
+
+  /** The hall in `picks` closest to where the trip starts. One hall stays that hall. */
+  private closestHall(picks: FoodPick[], from: Place): string {
+    const halls = [...new Set(picks.map((p) => p.hall))];
+    if (halls.length === 1) return halls[0];
+    const open = [...new Set(picks.filter((p) => p.open).map((p) => p.hall))];
+    const pool = open.length ? open : halls;
+    const origin = endpointPosition(from.endpoint);
+    let best = pool[0];
+    let bestMeters = Number.POSITIVE_INFINITY;
+    for (const hall of pool) {
+      const place = this.placeFor(hall);
+      if (!place) continue;
+      const at = endpointPosition(place.endpoint);
+      const meters = haversine(origin[0], origin[1], at[0], at[1]);
+      if (meters < bestMeters) {
+        best = hall;
+        bestMeters = meters;
+      }
+    }
+    return best;
+  }
+
+  private placeFor(hall: string): Place | null {
+    for (const query of [HALL_PLACE[hall], hall]) {
+      if (!query) continue;
+      const place = this.find(query);
+      if (place) return place;
+    }
+    return null;
   }
 
   /** "Next bus at Gilman": the stop's timetable and live buses; the stop nearest you if none is named. */
