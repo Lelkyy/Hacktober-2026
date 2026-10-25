@@ -26,8 +26,10 @@ export interface ChatCampus {
 
 /** Knobs each app sets. */
 export interface ChatSettings {
-  /** "auto": Chrome's built-in model, else Gemma through Ollama, else simple patterns. "off": patterns only. */
+  /** "auto": Gemma in LM Studio, else Chrome's built-in model, else Gemma through Ollama, else simple patterns. "off": patterns only. */
   gemma: "auto" | "off";
+  /** LM Studio model id (`lms ls`); any loaded "gemma…" model works too. */
+  lmStudioModel: string;
   /** The Ollama model to use; any "gemma…" model Ollama has works too. */
   ollamaModel: string;
   /** Aim to reach class this many minutes before it starts. */

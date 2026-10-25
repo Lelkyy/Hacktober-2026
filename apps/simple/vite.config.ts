@@ -6,7 +6,10 @@ export default defineConfig({
   envDir: "../web",
   server: {
     port: 5173,
-    // Gemma through Ollama, when Chrome has no built-in model: same origin, so no CORS setup.
-    proxy: { "/ollama": { target: "http://127.0.0.1:11434", rewrite: (path) => path.replace(/^\/ollama/, "") } },
+    // Gemma: LM Studio (OpenAI API) or Ollama. Same origin, so no CORS setup.
+    proxy: {
+      "/lmstudio": { target: "http://127.0.0.1:1234", rewrite: (path) => path.replace(/^\/lmstudio/, "") },
+      "/ollama": { target: "http://127.0.0.1:11434", rewrite: (path) => path.replace(/^\/ollama/, "") },
+    },
   },
 });
