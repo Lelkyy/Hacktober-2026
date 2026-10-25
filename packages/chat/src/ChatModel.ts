@@ -23,9 +23,9 @@ type Brain =
 
 /**
  * Reads chat messages into an Intent with a language model on this computer:
- * Chrome's built-in model (Gemini Nano), else Gemma through Ollama (the dev
- * server's /ollama proxy). Otherwise, and whenever the model fails, the pattern
- * parser, so the chat always answers.
+ * Gemma when Ollama has it installed (the dev server's /ollama proxy), else
+ * Chrome's built-in model (Gemini Nano). Otherwise, and whenever the model
+ * fails, the pattern parser, so the chat always answers.
  */
 export class ChatModel {
   private brain: Brain = { kind: "patterns" };
@@ -36,10 +36,16 @@ export class ChatModel {
     private readonly onStatus: (message: string) => void,
   ) {}
 
-  /** Find a model. Resolves quickly; never throws. */
+  /** Find a model: the Gemma installed on this computer (Ollama), else Chrome's built-in one. Never throws. */
   async connect(): Promise<void> {
     if (this.settings.gemma === "off" || new URLSearchParams(location.search).get("gemma") === "off") {
       this.onStatus("The language model is off. Using simple patterns.");
+      return;
+    }
+    const installed = await this.installedModel();
+    if (installed) {
+      this.brain = { kind: "ollama", model: installed };
+      this.onStatus(`Gemma (${installed}, installed through Ollama) is ready.`);
       return;
     }
     const chrome = globalThis.LanguageModel;
@@ -52,23 +58,26 @@ export class ChatModel {
           return;
         }
       } catch {
-        // Fall through to Ollama.
+        // No built-in model either.
       }
     }
-    try {
-      const res = await fetch("/ollama/api/tags", { signal: AbortSignal.timeout(1500) });
-      const { models } = (await res.json()) as { models: { name: string }[] };
-      const names = models.map((m) => m.name);
-      const model = names.find((n) => n === this.settings.ollamaModel) ?? names.find((n) => n.startsWith("gemma"));
-      if (model) {
-        this.brain = { kind: "ollama", model };
-        this.onStatus(`Gemma (${model}, through Ollama) is ready.`);
-        return;
+    this.onStatus(`No language model found. Run "ollama pull ${this.settings.ollamaModel}" for Gemma. Using simple patterns for now.`);
+  }
+
+  /** A Gemma model Ollama already has. Ollama can be slow to wake, so this waits and tries twice. */
+  private async installedModel(): Promise<string | null> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch("/ollama/api/tags", { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) return null;
+        const { models } = (await res.json()) as { models?: { name: string }[] };
+        const names = (models ?? []).map((m) => m.name);
+        return names.find((n) => n === this.settings.ollamaModel) ?? names.find((n) => n.startsWith("gemma")) ?? null;
+      } catch {
+        // Cold start: one more try.
       }
-      this.onStatus(`Ollama has no Gemma model. Run "ollama pull ${this.settings.ollamaModel}". Using simple patterns for now.`);
-    } catch {
-      this.onStatus("No language model found (Chrome's built-in AI or Gemma in Ollama). Using simple patterns.");
     }
+    return null;
   }
 
   get name(): string {
@@ -77,14 +86,26 @@ export class ChatModel {
     return "patterns";
   }
 
-  /** `previous`: the request being changed, so "by bike instead" makes sense. */
-  async read(message: string, previous: Intent | null): Promise<Intent> {
+  /** `previous`: the request being changed, so "by bike instead" makes sense. `facts`: details already remembered. */
+  async read(message: string, previous: Intent | null, facts: string[] = []): Promise<Intent> {
     const fallback = parseLocally(message, this.isCourse);
     const input = previous ? `Previous request: ${JSON.stringify(previous)}\nNew message: ${message}` : message;
     try {
-      const answer = await this.ask(input);
+      const answer = await this.ask(input, facts);
       const intent = answer === null ? null : cleanIntent(JSON.parse(answer));
       if (!intent) return fallback;
+      // A lasting detail the patterns caught ("I usually bike") even if the model left remember empty.
+      if (!intent.remember?.length && fallback.remember) intent.remember = fallback.remember;
+      // A lasting detail's mode and start, when the model answered the trip but skipped them.
+      if (!intent.from && fallback.from) intent.from = fallback.from;
+      if (fallback.remember && !intent.mode && fallback.mode) intent.mode = fallback.mode;
+      // "2 bobas at Pines, how long and where" is an order even if the model reads "where" as a route.
+      if (fallback.action === "order") {
+        intent.action = "order";
+        intent.place = fallback.place ?? intent.place;
+        intent.item = fallback.item ?? intent.item;
+        intent.quantity = fallback.quantity ?? intent.quantity;
+      }
       // The model reads sentences better; the patterns know which course codes exist.
       if (intent.course && !this.isCourse(intent.course)) intent.course = fallback.course;
       if (!intent.course && fallback.course && intent.action !== "route") {
@@ -99,7 +120,7 @@ export class ChatModel {
   }
 
   /** The model's raw JSON answer, or null when there's no model to ask. */
-  private async ask(input: string): Promise<string | null> {
+  private async ask(input: string, facts: string[]): Promise<string | null> {
     const now = new Date();
     if (this.brain.kind === "chrome") {
       if (!this.brain.ready) {
@@ -107,7 +128,7 @@ export class ChatModel {
         return null;
       }
       // A fresh session each time: the date and time in the instructions stay current.
-      const session = await this.brain.model.create({ ...LANGUAGES, initialPrompts: [{ role: "system", content: systemPrompt(now) }] });
+      const session = await this.brain.model.create({ ...LANGUAGES, initialPrompts: [{ role: "system", content: systemPrompt(now, facts) }] });
       try {
         return await session.prompt(input, { responseConstraint: INTENT_SCHEMA });
       } finally {
@@ -124,7 +145,7 @@ export class ChatModel {
           format: INTENT_SCHEMA,
           options: { temperature: 0 },
           messages: [
-            { role: "system", content: systemPrompt(now) },
+            { role: "system", content: systemPrompt(now, facts) },
             { role: "user", content: input },
           ],
         }),

@@ -20,6 +20,8 @@ import { forgetCourse, myClasses, rememberSection } from "./myClasses.ts";
 import type { ChatModel } from "./ChatModel.ts";
 import type { Intent, TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
+import { explainStatus, findItems, hallNamed, loadMenu, money, prepMinutes, quote } from "./dining.ts";
+import { loadMemory, noteFact, saveMemory, type Memory } from "./memory.ts";
 import { nearbyKind, nearest } from "./nearby.ts";
 import { groupOf, nearestStop, stopNamed, stopSummary } from "./stops.ts";
 
@@ -85,7 +87,6 @@ interface Trip {
 
 /** Starting points offered when the app doesn't know where you are. */
 const START_PICKS = ["Geisel Library", "Price Center", "Warren Lecture Hall", "RIMAC"];
-const TRAVEL_CHOICES: TravelMode[] = ["walk", "bike", "bus", "accessible"];
 
 /**
  * The conversation. Gemma reads each message; everything said back (rooms,
@@ -105,8 +106,11 @@ export class Assistant {
   /** The last start named, for when there's no location: better than asking every time. */
   private lastStart: Place | null = null;
   private mode: TravelMode = "walk";
+  /** Set only when this request names a way to travel. Otherwise the fastest way is used. */
+  private explicit: TravelMode | null = null;
   private trip: Trip | null = null;
   private last: Intent | null = null;
+  private readonly memory: Memory;
   /** The last reply asked "where are you?": this runs once it's answered. */
   private pending: ((at: Place) => Promise<Reply>) | null = null;
 
@@ -119,29 +123,41 @@ export class Assistant {
     this.view = deps.view;
     this.arriveEarlyMin = deps.settings.arriveEarlyMin;
     this.classes = new ClassFinder(this.campus);
+    this.memory = loadMemory();
+    if (this.memory.mode) this.mode = this.memory.mode;
+  }
+
+  /** A sentence for the greeting, when something from an earlier chat is still kept. */
+  known(): string {
+    if (!this.memory.facts.length) return "";
+    return ` I remember: ${this.memory.facts.join("; ")}.`;
   }
 
   async handle(message: string): Promise<Reply> {
-    const intent = await this.model.read(message, this.last);
+    const intent = await this.model.read(message, this.last, this.memory.facts);
     console.info("[chat]", this.model.name, intent);
     this.last = intent;
-    if (intent.mode && intent.action !== "stop") this.mode = intent.mode;
+    const noted = this.keep(intent);
+    if (intent.mode && intent.action !== "stop") this.explicit = intent.mode;
+    else if (intent.action === "class" || intent.action === "route" || intent.action === "nearby" || intent.action === "next") this.explicit = null;
+    const finish = (reply: Reply): Reply =>
+      noted.length ? { ...reply, text: `${reply.text}\nI'll remember: ${noted.join("; ")}.` } : reply;
 
     // An answer to "where are you?", unless it's a whole new request.
     const pending = this.pending;
     if (pending && ["change", "other"].includes(intent.action)) {
       const place = this.find(intent.from ?? intent.place ?? message);
-      if (!place) return this.askWhere(`I couldn't find "${intent.from ?? intent.place ?? message}". Where are you?`, pending);
+      if (!place) return finish(this.askWhere(`I couldn't find "${intent.from ?? intent.place ?? message}". Where are you?`, pending));
       this.startAt(place);
       this.pending = null;
-      return pending(place);
+      return Promise.resolve(pending(place)).then(finish);
     }
     this.pending = null;
 
     if (intent.from && /^(here|me|my location|where i am)$/i.test(intent.from)) this.from = null;
     else if (intent.from) {
       const place = this.find(intent.from);
-      if (!place) return this.askWhere(`I couldn't find "${intent.from}". Where are you?`, () => this.go());
+      if (!place) return finish(this.askWhere(`I couldn't find "${intent.from}". Where are you?`, () => this.go()));
       this.startAt(place);
     } else if (intent.action !== "change") {
       // A new request starts from where you are again.
@@ -150,36 +166,51 @@ export class Assistant {
 
     switch (intent.action) {
       case "class":
-        return this.toClass(intent);
+        return Promise.resolve(this.toClass(intent)).then(finish);
       case "next":
-        return this.nextClass();
+        return Promise.resolve(this.nextClass()).then(finish);
       case "add":
-        return this.addCourse(intent.course);
+        return Promise.resolve(this.addCourse(intent.course)).then(finish);
       case "drop":
-        return this.dropCourse(intent.course);
+        return Promise.resolve(this.dropCourse(intent.course)).then(finish);
       case "classes":
-        return this.listClasses();
+        return Promise.resolve(this.listClasses()).then(finish);
       case "day":
-        return this.dayPlan(intent.day);
+        return Promise.resolve(this.dayPlan(intent.day)).then(finish);
       case "route":
-        if (intent.place) return this.toPlace(intent.place, this.target(intent));
+        if (intent.place) return Promise.resolve(this.toPlace(intent.place, this.target(intent))).then(finish);
         break;
       case "nearby":
-        return this.nearby(intent.what ?? message, intent.place);
+        return this.nearby(intent.what ?? message, intent.place).then(finish);
       case "stop":
-        return this.stopTimes(intent.place);
+        return this.stopTimes(intent.place).then(finish);
+      case "order":
+        return this.orderFood(intent, message).then(finish);
       case "change":
         if (this.trip) {
           const target = this.target(intent);
           if (target) this.trip = { ...this.trip, arriveBy: target };
-          return this.go();
+          return this.go().then(finish);
         }
     }
-    return {
+    return finish({
       text:
         intent.reply ??
-        `Tell me where you need to be, like "I have MATH 20C in 30 minutes", "nearest restroom" or "next bus at Gilman". Add your classes with "add MATH 20C", then ask "what do I have today".`,
-    };
+        (noted.length
+          ? "Got it. I'll use that the next time you ask for directions."
+          : `Tell me where you need to be, like "I have MATH 20C in 30 minutes", "nearest restroom" or "next bus at Gilman". Add your classes with "add MATH 20C", then ask "what do I have today".`),
+    });
+  }
+
+  /** Save lasting facts from this message. One-off trips (no `remember`) change nothing. */
+  private keep(intent: Intent): string[] {
+    const facts = intent.remember ?? [];
+    if (!facts.length) return [];
+    for (const fact of facts) noteFact(this.memory, fact);
+    if (intent.mode) this.memory.mode = intent.mode;
+    if (intent.from && !/^(here|me|my location|where i am)$/i.test(intent.from)) this.memory.start = intent.from;
+    saveMemory(this.memory);
+    return facts;
   }
 
   /** The time a message gives: "in 30 minutes" or "at 3pm" (on its day). */
@@ -222,9 +253,9 @@ export class Assistant {
   greeting(examples: string[]): Reply {
     const term = this.classes.term;
     const next = this.upcoming()[0];
-    const text = next
-      ? `Next up: ${describe(next)}, ${when(next.startsAt!)}.`
-      : `Tell me where you need to be${term ? `, or add a class ("add MATH 20C")` : ""}.`;
+    const text = `${
+      next ? `Next up: ${describe(next)}, ${when(next.startsAt!)}.` : `Tell me where you need to be${term ? `, or add a class ("add MATH 20C")` : ""}.`
+    }${this.known()}`;
     return {
       text,
       choices: [
@@ -425,6 +456,56 @@ export class Assistant {
     return this.go();
   }
 
+  /**
+   * A Triton2Go question: today's HDH price times the quantity, the refundable box,
+   * and what the app's wait words actually mean. Then the route to that hall.
+   */
+  private async orderFood(intent: Intent, message: string): Promise<Reply> {
+    const status = explainStatus(message);
+    const hall = hallNamed(intent.place ?? "") ?? hallNamed(message);
+    if (!hall) {
+      return {
+        text:
+          status ??
+          `Which dining hall? Pines, 64 Degrees, OceanView, Ventanas, the Bistro, Foodworx, Sixth, or Club Med. I can price a dish off today's menu and take you there.`,
+      };
+    }
+    let menu;
+    try {
+      menu = await loadMenu(hall);
+    } catch {
+      return {
+        text: `${status ? `${status} ` : ""}I couldn't load the ${hall.name} menu just now. A Triton2Go box is a $5 refundable deposit unless the item is a drink, pizza, burrito, wrap, sandwich, or pastry. Only "Pick up" or "Ready now" means it's ready.`,
+      };
+    }
+    const matches = intent.item ? findItems(menu, intent.item) : [];
+    const qty = intent.quantity ?? 1;
+    let bill: string;
+    if (matches.length > 1) {
+      const lines = matches.slice(0, 6).map((item) => {
+        const each = item.price;
+        return each !== undefined ? `${qty} × ${item.name}: ${money(each)} each, ${money(each * qty)}` : item.name;
+      });
+      const prep = prepMinutes(matches[0].name, hall);
+      bill = `${qty} bobas at ${hall.name} (${menu.hours}):\n${lines.join("\n")}\nDrinks skip the $5 Triton2Go box. About ${prep} min once the kitchen has the ticket. Only "Pick up" or "Ready now" means it's ready.`;
+    } else if (matches.length === 1) {
+      bill = quote(menu, matches[0], qty);
+    } else {
+      const sample = menu.items
+        .filter((i) => i.price !== undefined)
+        .slice(0, 4)
+        .map((i) => `${i.name} ${money(i.price!)}`)
+        .join(", ");
+      bill = `${hall.name} is ${menu.hours}.${sample ? ` A few prices: ${sample}.` : ""} ${status ?? `Name a dish and how many, like "2 boba at Pines".`}`;
+    }
+    if (status) bill = `${bill} ${status}`;
+    const place = this.find(hall.place);
+    if (!place) return { text: bill };
+    this.trip = { to: place, arriveBy: null, title: hall.name, name: hall.name };
+    const routed = await this.go();
+    return { ...routed, text: `${bill}\n${routed.text}` };
+  }
+
   /** "Next bus at Gilman": the stop's timetable and live buses; the stop nearest you if none is named. */
   private async stopTimes(name: string | undefined): Promise<Reply> {
     let stop = name ? stopNamed(this.campus, name) : undefined;
@@ -447,7 +528,7 @@ export class Assistant {
         {
           label: `Walk to ${stop.name}`,
           pick: () => {
-            this.mode = "walk";
+            this.explicit = "walk";
             this.trip = { to: { endpoint: { kind: "point", lngLat: stop.lngLat, label: stop.name }, label: stop.name }, arriveBy: null, title: stop.name, name: stop.name };
             return this.go();
           },
@@ -462,22 +543,38 @@ export class Assistant {
     if (!trip) return { text: "Where do you want to go?" };
     const from = await this.start();
     if (!from) return this.askWhere(`${trip.title}. Where are you starting from?`, () => this.go());
-    const planned = this.planner.plan(from.endpoint, trip.to.endpoint, this.mode, trip.arriveBy ?? undefined);
-    if (!planned.ok) {
+    const options = this.planner.compare(from.endpoint, trip.to.endpoint, trip.arriveBy ?? undefined);
+    const wanted = this.explicit ? options.find((o) => o.mode === this.explicit) : undefined;
+    const picked = wanted ?? options[0];
+    if (!picked) {
       this.view.trip(null);
-      return { text: `${trip.title}. ${planned.error}` };
+      return { text: `${trip.title}. No route from ${from.label}.` };
     }
+    this.mode = picked.mode;
+    const planned = picked.planned;
     const route = planned.route;
-    this.view.trip({ from: from.endpoint, to: trip.to.endpoint, mode: this.mode, arriveBy: trip.arriveBy, title: trip.title, name: trip.name, route });
-    const minutes = Math.ceil(planned.minutes);
-    const how = planned.walkInstead ? "Walking is as fast as transit here" : MODES[this.mode].label;
+    this.view.trip({ from: from.endpoint, to: trip.to.endpoint, mode: picked.mode, arriveBy: trip.arriveBy, title: trip.title, name: trip.name, route });
+    const minutes = Math.max(1, Math.ceil(planned.minutes));
+    const fastest = options[0];
+    const others = options.filter((o) => o.mode !== picked.mode);
+    const how = MODES[picked.mode].label;
+    const asked = this.explicit && wanted ? "" : this.explicit && !wanted ? `${MODES[this.explicit].label} isn't possible here. ` : "";
+    const choice = !this.explicit || !wanted
+      ? `Fastest is ${how.toLowerCase()}`
+      : picked.mode === fastest.mode
+        ? `${how} is the fastest`
+        : `${how}, though ${MODES[fastest.mode].label.toLowerCase()} is faster (${Math.max(1, Math.ceil(fastest.planned.minutes))} min)`;
+    const also = others.map((o) => `${MODES[o.mode].label} ${Math.max(1, Math.ceil(o.planned.minutes))} min`).join(" · ");
+    const usual = this.memory.mode && this.memory.mode !== picked.mode ? options.find((o) => o.mode === this.memory.mode) : undefined;
     const lines = [
       `${trip.title}.`,
-      `${how} from ${from.label}: ${minutes} min, ${distance(route.meters)}. ${leaveAdvice(route, this.mode, minutes, trip.arriveBy, this.arriveEarlyMin)}`.trim(),
+      `${asked}${choice} from ${from.label}: ${minutes} min, ${distance(route.meters)}. ${leaveAdvice(route, picked.mode, minutes, trip.arriveBy, this.arriveEarlyMin)}`.trim(),
+      also ? `Also: ${also}.` : "",
+      usual && !this.explicit ? `You usually ${MODES[usual.mode].label.toLowerCase()} (${Math.max(1, Math.ceil(usual.planned.minutes))} min). Say so if you want that instead.` : "",
       ...this.transitLines(route),
       ...this.insideLines(trip.to.endpoint, route),
       ...(trip.notes ?? []),
-    ];
+    ].filter(Boolean);
     const leaving = from.endpoint.kind === "building" ? from.endpoint.building : undefined;
     const steps = buildSteps(this.campus.graph, route, trip.to.label, { leaving }).map(
       (s) => `${s.text}${s.distance >= 15 ? ` (${distance(s.distance)})` : ""}`,
@@ -485,10 +582,10 @@ export class Assistant {
     return {
       text: lines.join("\n"),
       steps,
-      choices: TRAVEL_CHOICES.filter((m) => m !== this.mode).map((m) => ({
-        label: MODES[m].label,
+      choices: others.map((o) => ({
+        label: `${MODES[o.mode].label} · ${Math.max(1, Math.ceil(o.planned.minutes))} min`,
         pick: () => {
-          this.mode = m;
+          this.explicit = o.mode;
           return this.go();
         },
       })),
@@ -550,7 +647,11 @@ export class Assistant {
     const at = await this.location.get();
     // "My location": the label the full app follows your dot by.
     if (at && this.location.onCampus(at)) return { endpoint: { kind: "point", lngLat: at, label: "My location" }, label: "your location" };
-    return this.lastStart;
+    if (this.lastStart) return this.lastStart;
+    if (!this.memory.start) return null;
+    const usual = this.find(this.memory.start);
+    if (usual) this.lastStart = usual;
+    return usual;
   }
 
   private find(query: string): Place | null {
