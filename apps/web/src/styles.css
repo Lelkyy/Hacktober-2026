@@ -1071,3 +1071,28 @@ button.start { width: 100%; padding: 11px; font-size: 15px; border-radius: 999px
   .day-home { grid-template-columns: 28px 1fr; }
   .day-home > button { grid-column: 2; justify-self: start; }
 }
+
+.dining { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-2); }
+.dining-title { margin: 0; font-weight: 650; }
+.dining-hours { margin: 0; color: var(--muted); font-size: 13px; }
+.dining-stations { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.dining-stations button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  flex: none;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  text-align: left;
+}
+.dining-stations button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.dining-station-hours { color: var(--muted); font-size: 11px; font-weight: 500; }
+.dining-stations button.on .dining-station-hours { color: var(--accent); }
+.dining-meals { display: flex; flex-wrap: wrap; gap: 6px; }
+.dining-meals button { padding: 4px 10px; border-radius: 999px; font-size: 12px; }
+.dining-meals button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.dining-items { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; }
+.dining-items li { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.dining-price { color: var(--muted); white-space: nowrap; }

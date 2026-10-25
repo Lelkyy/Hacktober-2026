@@ -11,6 +11,7 @@
 | `npm run build:graph` | Rebuild the map data from cached downloads + edits + private schedule |
 | `npm run fetch:osm` | Re-download OpenStreetMap data, the shuttle timetable, UCSD's ground plan, the illustrated map's tiles and the elevation tiles, then rebuild |
 | `npm run fetch:places` | Re-download UCSD's campus places (restrooms, food, water, bike racks...) into `apps/web/public/data/campus-places.json` |
+| `npm run fetch:menus` | Re-download HDH dining menus and prices into `apps/web/public/data/menus.json` |
 | `npm run fetch:rooms` | Re-scrape building/room lists from the old public Schedule of Classes (terms up to Summer 2026) |
 
 ## How it fits together
@@ -215,8 +216,9 @@ Ask Leonid for the files. Don't commit them or the generated
   **Simulate** walks the route on screen (6x speed); it shows in dev and whenever
   there's no GPS fix.
 - `indoor.ts`: routes skip emergency exits, and step-free routes prefer doors
-  tagged `wheelchair=yes`. Every room is pinned to the middle of its building
-  (`buildingCentre`), so a room doesn't pick the door. The middle is the point
+  tagged `wheelchair=yes`. A mapped or pinned room is pointed at that spot.
+  Any other room is pinned to the middle of its building (`buildingCentre`),
+  so the marker stays inside and the route still ends at a door. The middle is the point
   of the outline farthest from every wall, nudged toward the centre of mass on
   near ties. It's always inside the building, even an L or a U, where the
   centre of mass can sit in the courtyard (54 of 574 buildings had their listed

@@ -76,6 +76,8 @@ import {
   WalkIcon,
 } from "./Icons.tsx";
 import { InsideCard } from "./InsideCard.tsx";
+import { DiningMenu } from "./DiningMenu.tsx";
+import { findDining, type DiningMenus } from "./diningMenu.ts";
 import { NavigationView } from "./NavigationView.tsx";
 import type { DirectionsOptions } from "./DayView.tsx";
 import { TimingControl, type TimingState } from "./TimingControl.tsx";
@@ -222,7 +224,7 @@ export function App() {
   // Campus or illustrated (anything saved from before those were the only two is campus).
   const [baseMap, setBaseMap] = useState<BaseMap>(() => (storage.get<string>("campus-nav:base-map", "campus") === "illustrated" ? "illustrated" : "campus"));
   useEffect(() => storage.set("campus-nav:base-map", baseMap), [baseMap]);
-  const [placeCategories, setPlaceCategories] = useState<string[]>(() => storage.get<string[]>("campus-nav:place-categories", []));
+  const [placeCategories, setPlaceCategories] = useState<string[]>(() => storage.get<string[]>("campus-nav:place-categories", ["food"]));
   useEffect(() => storage.set("campus-nav:place-categories", placeCategories), [placeCategories]);
   // UCSD's places (restrooms, food, water...), fetched when first shown.
   const [campusPlaces, setCampusPlaces] = useState<CampusPlaces | null>(null);
@@ -231,6 +233,13 @@ export function App() {
       .then((r) => (r.ok ? (r.json() as Promise<CampusPlaces>) : null))
       .then(setCampusPlaces)
       .catch(() => setCampusPlaces(null));
+  }, []);
+  const [menus, setMenus] = useState<DiningMenus | null>(null);
+  useEffect(() => {
+    fetch("/data/menus.json")
+      .then((r) => (r.ok ? (r.json() as Promise<DiningMenus>) : null))
+      .then(setMenus)
+      .catch(() => setMenus(null));
   }, []);
 
   /** Report tab: the spot tapped on the map, and the route the report is about (if any). */
@@ -630,6 +639,16 @@ export function App() {
     [data, route, to, from],
   );
   const destBuilding = to?.kind === "building" ? to.building : null;
+  const dining = useMemo(() => {
+    if (!menus || !to) return null;
+    const names =
+      to.kind === "place" ? [to.place.name, ...to.place.aliases] : to.kind === "building" ? [to.building.name, ...to.building.aliases] : to.kind === "point" ? [to.label] : [];
+    for (const name of names) {
+      const hit = findDining(menus, name);
+      if (hit) return hit;
+    }
+    return null;
+  }, [menus, to]);
   const inside = useMemo(
     () =>
       data && destBuilding && route
@@ -847,6 +866,7 @@ export function App() {
           baseMap={baseMap}
           places={campusPlaces}
           placeCategories={placeCategories}
+          menus={menus}
           spinBikes={spinOn ? spinBikes : null}
           scooterRules={scooterRules}
           scooterTrip={mode === "scooter" && scooterTrip && !showingDay ? { scooter: scooterTrip.scooter.lngLat, parking: scooterTrip.parking } : null}
@@ -872,6 +892,7 @@ export function App() {
             setTab("go");
             setTo({ kind: "point", lngLat: p.lngLat, label: p.name });
             setHint(null);
+            if (menus && findDining(menus, p.name)) setSheetOpen(true);
           }}
           reportPin={tab === "report" ? reportPin : null}
           pickingSpot={tab === "report"}
@@ -1066,6 +1087,7 @@ export function App() {
                 })}
               </div>
 
+              {dining && menus && <DiningMenu menus={menus} match={dining} />}
               <TimingControl value={timing} onChange={setTiming} />
               {arriveBy?.label && (
                 <p className="note">

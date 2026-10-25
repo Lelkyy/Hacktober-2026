@@ -182,4 +182,17 @@ describe("indoor floors", () => {
     expect(say("B210")).toBe("in the basement");
     expect(roomFloor(rooms, "Auditorium")).toBeUndefined();
   });
+
+  it("names a span of OSM levels, not just the first one", () => {
+    expect(levelLabel("0-3")).toBe("Floor 1 (ground) to Floor 4");
+    expect(levelLabel("-1;0;1")).toBe("Basement to Floor 2");
+    expect(floorPhrase({ floor: "0-3", label: levelLabel("0-3"), source: "map" })).toBe("across Floor 1 (ground) to Floor 4");
+  });
+
+  it("points at a placed room, otherwise the middle of the building", () => {
+    const hall: Building = { id: "h", name: "Hall", aliases: [], center: [1, 1], targets: [], entranceCount: 0, access: "walk" };
+    expect(insideHints(hall, "3109", rooms, null).roomAt).toEqual([5, 5]);
+    expect(insideHints(hall, "1202", rooms, null).roomAt).toEqual([0, 0]);
+    expect(insideHints(hall, "2001", rooms, null).roomAt).toEqual([1, 1]);
+  });
 });

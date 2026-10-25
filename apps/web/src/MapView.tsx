@@ -26,6 +26,7 @@ import {
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PALETTE } from "./palette.ts";
+import { findDining, hallPinName, nameKey, type DiningMenus } from "./diningMenu.ts";
 import { formatDistance, formatLead } from "./Itinerary.tsx";
 import type { LineBadge } from "./lineColor.ts";
 import { stopBadgeElement } from "./StopBadge.tsx";
@@ -136,6 +137,8 @@ export interface MapViewProps {
   /** UCSD's places, and the categories to show. */
   places: CampusPlaces | null;
   placeCategories: string[];
+  /** HDH menus, so a dining-hall pin opens today's menu. */
+  menus: DiningMenus | null;
   onPlaceDirections: (place: PlacePick) => void;
   /** A spot being reported (orange marker). */
   reportPin: LngLat | null;
@@ -150,7 +153,6 @@ export interface MapViewProps {
   doors: { lngLat: LngLat; used: boolean }[];
   /** A mapped indoor room to point at, with its label. */
   room: { lngLat: LngLat; label: string } | null;
-  /** One floor of a building's indoor map, with the destination room highlighted. */
   /** Fly the camera here (bump `key` to repeat). */
   focus: { at: LngLat; zoom: number; key: number } | null;
   /** Taps mark a spot rather than set a route endpoint: show a crosshair. */
@@ -680,7 +682,7 @@ export function MapView(props: MapViewProps) {
         popup.current?.remove();
         popup.current = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup" })
           .setLngLat(at)
-          .setDOMContent(placeCard((bike.properties as { name: string }).name, (bike.properties as { detail: string }).detail, "", () => {
+          .setDOMContent(placeCard((bike.properties as { name: string }).name, (bike.properties as { detail: string }).detail, "", "", () => {
             popup.current?.remove();
             callbacks.current.onPlaceDirections({ lngLat: at, name: (bike.properties as { name: string }).name });
           }))
@@ -702,10 +704,17 @@ export function MapView(props: MapViewProps) {
         callbacks.current.onClearOverlay?.();
         const at = hit.geometry.coordinates as LngLat;
         const { name, kind, building } = hit.properties as { name: string; kind: string; building: string };
+        const menus = callbacks.current.menus;
+        const dining = menus ? findDining(menus, name) : null;
         popup.current?.remove();
-        popup.current = new Popup({ closeButton: true, maxWidth: "240px", className: "place-popup" })
+        // A dining hall opens its hours and menu in the panel. Other places keep the small popup.
+        if (dining) {
+          callbacks.current.onPlaceDirections({ lngLat: at, name });
+          return;
+        }
+        popup.current = new Popup({ closeButton: true, maxWidth: "260px", className: "place-popup" })
           .setLngLat(at)
-          .setDOMContent(placeCard(name, kind, building, () => {
+          .setDOMContent(placeCard(name, kind, building, "", () => {
             popup.current?.remove();
             callbacks.current.onPlaceDirections({ lngLat: at, name });
           }))
@@ -767,6 +776,18 @@ export function MapView(props: MapViewProps) {
             .map(({ p }) => p);
         })
       : [];
+    // Every dining hall stays on the map, so each one can be tapped for its menu.
+    if (props.menus) {
+      const food = categories.findIndex((c) => c.id === "food");
+      const pins = new Set(props.menus.halls.map((h) => nameKey(hallPinName(h.name))));
+      const seen = new Set(shown.map((p) => `${p[0]},${p[1]},${p[3]}`));
+      for (const p of points) {
+        const key = `${p[0]},${p[1]},${p[3]}`;
+        if (p[2] !== food || !pins.has(nameKey(p[3])) || seen.has(key)) continue;
+        seen.add(key);
+        shown.push(p);
+      }
+    }
     source(mapRef.current!, "places").setData({
       type: "FeatureCollection",
       features: shown.map(([lng, lat, cat, name, kind, building]) => ({
@@ -775,7 +796,7 @@ export function MapView(props: MapViewProps) {
         geometry: { type: "Point", coordinates: [lng, lat] },
       })),
     });
-  }, [ready, props.places, props.placeCategories, anchor?.[0], anchor?.[1]]);
+  }, [ready, props.places, props.placeCategories, props.menus, anchor?.[0], anchor?.[1]]);
 
   // Live trolleys and buses: a marker for each one in or near view, exactly at its last GPS fix,
   // in its line's color, with an arrow the way it last moved and how long ago the fix was taken.
@@ -1607,13 +1628,13 @@ function routeArrowImage(): ImageData {
 }
 
 /** The popup for a tapped place. */
-function placeCard(name: string, kind: string, building: string, onGo: () => void): HTMLElement {
+function placeCard(name: string, kind: string, building: string, hours: string, onGo: () => void): HTMLElement {
   const el = document.createElement("div");
   const title = document.createElement("strong");
   title.textContent = name;
   const meta = document.createElement("span");
   meta.className = "place-popup-meta";
-  meta.textContent = [kind === name ? "" : kind, building].filter(Boolean).join(" · ");
+  meta.textContent = [kind === name ? "" : kind, building, hours].filter(Boolean).join(" · ");
   const go = document.createElement("button");
   go.className = "primary small-btn";
   go.textContent = "Directions here";
