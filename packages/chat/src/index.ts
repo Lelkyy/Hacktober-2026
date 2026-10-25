@@ -7,3 +7,4 @@ export * from "./TripPlanner.ts";
 export * from "./classes.ts";
 export * from "./nearby.ts";
 export * from "./stops.ts";
+export * from "./myClasses.ts";

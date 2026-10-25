@@ -98,18 +98,9 @@ registerIllustratedTiles();
 
 const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
-/** A day's classes on the map: the walks between them, and a numbered pin per class. */
-export interface DayOverlay {
-  lines: { coordinates: LngLat[]; color: string }[];
-  /** One pin per building; `n` lists the class numbers there ("1, 4"), `label` one line per class. */
-  stops: { lngLat: LngLat; n: string; label: string; color: string }[];
-}
-
 export interface MapViewProps {
   graph: CampusGraph;
   routeLines: RouteLine[] | null;
-  /** The day view's walks and classes (drawn instead of a route). */
-  day?: DayOverlay | null;
   connectors: [LngLat, LngLat][];
   stops: TransitStop[];
   showStops: boolean;
@@ -278,7 +269,7 @@ export function MapView(props: MapViewProps) {
       });
       for (const layer of UCSD_LAYERS) map.addLayer({ ...layer, layout: { ...layer.layout, visibility: "none" } } as unknown as LayerSpecification);
 
-      for (const id of ["route", "connectors", "stops", "doors", "day", "places", "spin", "vehicle-ahead", "stop-routes", "scooter-rules", "scooter-trip"]) {
+      for (const id of ["route", "connectors", "stops", "doors", "places", "spin", "vehicle-ahead", "stop-routes", "scooter-rules", "scooter-trip"]) {
         map.addSource(id, { type: "geojson", data: EMPTY });
       }
       // UCSD's places, under everything of the app's; names once zoomed in.
@@ -594,50 +585,6 @@ export function MapView(props: MapViewProps) {
         filter: ["!=", ["get", "kind"], "walk"],
         layout: { "line-cap": "round", "line-join": "round" },
         paint: { "line-color": ["get", "color"], "line-width": 7, "line-offset": KEEP_RIGHT_OFFSET },
-      });
-      // The day view: dotted walks between classes in the next class's color, numbered pins.
-      map.addLayer({
-        id: "day-line",
-        type: "line",
-        source: "day",
-        filter: ["==", ["geometry-type"], "LineString"],
-        layout: { "line-cap": "round", "line-join": "round" },
-        paint: { "line-color": ["get", "color"], "line-width": 6, "line-dasharray": [0.01, 1.6] },
-      });
-      map.addLayer({
-        id: "day-stop",
-        type: "circle",
-        source: "day",
-        filter: ["==", ["geometry-type"], "Point"],
-        paint: {
-          "circle-radius": ["case", [">", ["length", ["get", "n"]], 1], 15, 11],
-          "circle-color": ["get", "color"],
-          "circle-stroke-color": PALETTE.white,
-          "circle-stroke-width": 2.5,
-        },
-      });
-      map.addLayer({
-        id: "day-stop-n",
-        type: "symbol",
-        source: "day",
-        filter: ["==", ["geometry-type"], "Point"],
-        layout: { "text-field": ["get", "n"], "text-font": ["Noto Sans Regular"], "text-size": 11, "text-allow-overlap": true },
-        paint: { "text-color": PALETTE.white },
-      });
-      map.addLayer({
-        id: "day-stop-label",
-        type: "symbol",
-        source: "day",
-        filter: ["==", ["geometry-type"], "Point"],
-        layout: {
-          "text-field": ["get", "label"],
-          "text-font": ["Noto Sans Regular"],
-          "text-size": 12,
-          "text-offset": [0, 1.5],
-          "text-anchor": "top",
-          "text-optional": true,
-        },
-        paint: { "text-color": PALETTE.ink, "text-halo-color": PALETTE.white, "text-halo-width": 1.6 },
       });
       map.addLayer({
         id: "doors",
@@ -1146,33 +1093,6 @@ export function MapView(props: MapViewProps) {
     };
   }, [ready, props.logoStops, props.showTransitStops, props.selectedStopId, focusRoute, viewMoved]);
 
-  // The day view's walks and pins, framed whenever the day (or the choice of classes) changes.
-  const lastDay = useRef("");
-  useEffect(() => {
-    if (!ready) return;
-    const map = mapRef.current!;
-    const day = props.day;
-    source(map, "day").setData({
-      type: "FeatureCollection",
-      features: [
-        ...(day?.lines ?? []).map((l) => ({ ...lineFeature(l.coordinates), properties: { color: l.color } })),
-        ...(day?.stops ?? []).map((s) => ({
-          type: "Feature" as const,
-          properties: { n: s.n, label: s.label, color: s.color },
-          geometry: { type: "Point" as const, coordinates: s.lngLat },
-        })),
-      ],
-    });
-    const pts = [...(day?.lines ?? []).flatMap((l) => l.coordinates), ...(day?.stops ?? []).map((s) => s.lngLat)];
-    const key = JSON.stringify(day?.stops.map((s) => s.lngLat) ?? []);
-    if (pts.length && key !== lastDay.current) {
-      const bounds = new LngLatBounds(pts[0], pts[0]);
-      for (const p of pts) bounds.extend(p);
-      map.fitBounds(bounds, { padding: fitPadding(), maxZoom: 17.5, duration: 600 });
-    }
-    lastDay.current = key;
-  }, [ready, props.day]);
-
   useEffect(() => {
     if (!ready) return;
     const map = mapRef.current!;
@@ -1292,7 +1212,8 @@ function fitPadding() {
   if (window.innerWidth > 760) return { top: 60, right: 70, bottom: 60, left: 440 };
   // The map's own height: the chat bar takes the bottom of the window.
   const height = document.querySelector<HTMLElement>(".app")?.clientHeight ?? window.innerHeight;
-  return { top: 70, right: 40, bottom: Math.round(height * 0.5), left: 40 };
+  // The panel covers the bottom 36% (styles.css, .sheet on phones).
+  return { top: 70, right: 40, bottom: Math.round(height * 0.4), left: 40 };
 }
 
 /** Your position: a dot with a cone for the way you face (shown once a heading is known). */

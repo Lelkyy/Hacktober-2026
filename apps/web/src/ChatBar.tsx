@@ -1,6 +1,6 @@
 import { Assistant, ChatModel, Location, TripPlanner, type ChatCampus, type ChatView, type Reply } from "@campus/chat";
 import { courseKey, type LiveVehicle } from "@campus/core";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type FormEvent, type Ref } from "react";
 import { CHAT } from "./config.ts";
 
 interface Message {
@@ -11,7 +11,13 @@ interface Message {
   used?: boolean;
 }
 
-const EXAMPLES = ["I have MATH 20C tomorrow at 11", "Nearest restroom", "Next bus at Gilman", "Take me to Geisel by bike"];
+/** What the rest of the app can ask the chat to do (the Go button by a class). */
+export interface ChatHandle {
+  /** Show `label` as if typed, and answer with `work`. */
+  run(label: string, work: (assistant: Assistant) => Reply | Promise<Reply>): void;
+}
+
+const EXAMPLES = ["What do I have today?", "Nearest restroom", "Next bus at Gilman", "Add MATH 20C"];
 
 /**
  * The chat bar under the map: say where you need to be ("I have MATH 20C in 30
@@ -23,12 +29,14 @@ export function ChatBar({
   location,
   vehicles,
   view,
+  ref,
 }: {
   /** Null while the campus is loading. */
   campus: ChatCampus | null;
   location: Location | null;
   vehicles: () => LiveVehicle[];
   view: ChatView;
+  ref?: Ref<ChatHandle>;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [status, setStatus] = useState("Loading campus…");
@@ -63,16 +71,19 @@ export function ChatBar({
         },
         settings: CHAT,
       });
-      const term = campus.sections?.term;
-      say("bot", {
-        text: `Hi! Tell me where you need to be and I'll route you there.${term ? ` I know every ${term} class.` : ""}`,
-        choices: EXAMPLES.map((example) => ({ label: example, pick: () => assistant.current!.handle(example) })),
-      });
+      say("bot", assistant.current.greeting(EXAMPLES));
     });
     return () => {
       cancelled = true;
     };
   }, [campus, location]);
+
+  useImperativeHandle(ref, () => ({
+    run: (label, work) => {
+      const a = assistant.current;
+      if (a) void ask(label, async () => work(a));
+    },
+  }));
 
   useEffect(() => {
     list.current?.lastElementChild?.scrollIntoView({ block: "end", behavior: "smooth" });

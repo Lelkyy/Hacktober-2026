@@ -38,7 +38,7 @@ export function stopSummary(campus: ChatCampus, group: StopGroup, vehicles: Live
   const names = lines.map((l) => (l.route.mode === "trolley" ? `${l.route.short} Line` : l.route.short));
   const next = arrivalsAtStops(campus.transit, group.ids, new Date(), 6).map((a) => {
     const minutes = Math.round((a.at.getTime() - Date.now()) / 60_000);
-    return `${a.route.short} to ${a.headsign} · ${clock(a.at)}${minutes <= 60 ? ` (${minutes <= 0 ? "now" : `${minutes} min`})` : ""}`;
+    return `${a.route.short} to ${a.headsign} at ${clock(a.at)}${minutes <= 60 ? ` (${minutes <= 0 ? "now" : `${minutes} min`})` : ""}`;
   });
   const live = vehicles.filter((v) => lines.some((l) => l.route.short === v.route));
   return [

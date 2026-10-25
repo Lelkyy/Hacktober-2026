@@ -1,5 +1,7 @@
 import {
   buildSteps,
+  type CourseSections,
+  type SectionMeeting,
   endpointPosition,
   floorPhrase,
   insideHints,
@@ -13,7 +15,8 @@ import {
 } from "@campus/core";
 import type { ChatCampus, ChatSettings } from "./types.ts";
 import type { TripPlanner } from "./TripPlanner.ts";
-import { ClassFinder, clock, dayFor, describe, type ClassOption } from "./classes.ts";
+import { ClassFinder, clock, dayFor, describe, type ClassOption, type SectionGroup } from "./classes.ts";
+import { forgetCourse, myClasses, rememberSection } from "./myClasses.ts";
 import type { ChatModel } from "./ChatModel.ts";
 import type { Intent, TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
@@ -34,8 +37,10 @@ export interface ChatTrip {
   mode: TravelMode;
   /** Be there by this (a class's start), if there's a time. */
   arriveBy: Date | null;
-  /** "MATH 20C lecture, Mosaic 0114" */
+  /** "MATH 20C lecture, Mosaic 0114 at 11:00 AM" */
   title: string;
+  /** What you're going to, without the time: "MATH 20C lecture, Mosaic 0114" */
+  name: string;
   route: Route;
 }
 
@@ -72,6 +77,8 @@ interface Trip {
   arriveBy: Date | null;
   /** "MATH 20C lecture, Mosaic 0114 at 11:00 AM" */
   title: string;
+  /** Without the time: "MATH 20C lecture, Mosaic 0114" */
+  name: string;
   /** Extra lines for the answer: exams coming up, other nearby options. */
   notes?: string[];
 }
@@ -79,7 +86,6 @@ interface Trip {
 /** Starting points offered when the app doesn't know where you are. */
 const START_PICKS = ["Geisel Library", "Price Center", "Warren Lecture Hall", "RIMAC"];
 const TRAVEL_CHOICES: TravelMode[] = ["walk", "bike", "bus", "accessible"];
-const SAVED_SECTIONS_KEY = "chat.sections";
 
 /**
  * The conversation. Gemma reads each message; everything said back (rooms,
@@ -123,7 +129,7 @@ export class Assistant {
 
     // An answer to "where are you?", unless it's a whole new request.
     const pending = this.pending;
-    if (pending && !["class", "route", "nearby", "stop", "next"].includes(intent.action)) {
+    if (pending && ["change", "other"].includes(intent.action)) {
       const place = this.find(intent.from ?? intent.place ?? message);
       if (!place) return this.askWhere(`I couldn't find "${intent.from ?? intent.place ?? message}". Where are you?`, pending);
       this.startAt(place);
@@ -147,6 +153,14 @@ export class Assistant {
         return this.toClass(intent);
       case "next":
         return this.nextClass();
+      case "add":
+        return this.addCourse(intent.course);
+      case "drop":
+        return this.dropCourse(intent.course);
+      case "classes":
+        return this.listClasses();
+      case "day":
+        return this.dayPlan(intent.day);
       case "route":
         if (intent.place) return this.toPlace(intent.place, this.target(intent));
         break;
@@ -164,7 +178,7 @@ export class Assistant {
     return {
       text:
         intent.reply ??
-        `Tell me where you need to be, like "I have MATH 20C in 30 minutes", "nearest restroom" or "next bus at Gilman". Add "by bike", "by bus" or "from Price Center" any time.`,
+        `Tell me where you need to be, like "I have MATH 20C in 30 minutes", "nearest restroom" or "next bus at Gilman". Add your classes with "add MATH 20C", then ask "what do I have today".`,
     };
   }
 
@@ -185,11 +199,11 @@ export class Assistant {
     if (!course) return { text: `I couldn't find ${intent.course} in the ${this.classes.term} schedule.` };
     const target = this.target(intent);
     const day = target ?? dayFor(intent.day, new Date());
-    const saved = savedSections()[course.code];
+    const saved = myClasses()[course.code];
     const answer = this.classes.find(course, day, target, intent.meeting, saved);
     if (answer.pick) {
       // A time that matches one section is a good sign it's theirs.
-      if (target) saveSection(course.code, answer.pick.meeting.section);
+      if (target) rememberSection(course.code, answer.pick.meeting.section);
       return this.toOption(answer.pick, target);
     }
     return {
@@ -197,32 +211,163 @@ export class Assistant {
       choices: answer.choices.slice(0, 8).map((option) => ({
         label: `${describe(option)}${option.startsAt && !target ? ` · ${clock(option.startsAt)}` : ""}`,
         pick: async () => {
-          saveSection(course.code, option.meeting.section);
+          rememberSection(course.code, option.meeting.section);
           return this.toOption(option, target);
         },
       })),
     };
   }
 
-  /** "Where's my next class": the soonest meeting of the sections they've picked before. */
+  /** The first thing the chat says: what it can do, and your next class with a button to go. */
+  greeting(examples: string[]): Reply {
+    const term = this.classes.term;
+    const next = this.upcoming()[0];
+    const lines = [`Hi! Tell me where you need to be and I'll route you there.${term ? ` I know every ${term} class.` : ""}`];
+    if (next) lines.push(`Next up: ${describe(next)}, ${when(next.startsAt!)}.`);
+    else if (term) lines.push(`Add your classes ("add MATH 20C") and I'll keep track of them.`);
+    return {
+      text: lines.join("\n"),
+      choices: [
+        ...(next ? [{ label: `Take me to ${next.course.code}`, pick: () => this.toOption(next, null) }] : []),
+        ...examples.map((example) => ({ label: example, pick: () => this.handle(example) })),
+      ],
+    };
+  }
+
+  /** "Where's my next class": the soonest meeting of your classes. */
   private nextClass(): Reply | Promise<Reply> {
-    const upcoming = Object.entries(savedSections())
+    const next = this.upcoming()[0];
+    if (next) return this.toOption(next, null);
+    return {
+      text: Object.keys(myClasses()).length
+        ? "None of your classes meet in the next week."
+        : `I don't know your classes yet. Add one with "add MATH 20C", or tell me "I have MATH 20C at 11".`,
+    };
+  }
+
+  /** Directions to `code`'s next meeting (the Go button by a class in the app's list). */
+  goToCourse(code: string): Reply | Promise<Reply> {
+    const course = this.classes.course(code);
+    const section = myClasses()[course?.code ?? code];
+    const next = course && section ? this.classes.next(course, section) : null;
+    return next ? this.toOption(next, null) : { text: `${code} doesn't meet in the next week.` };
+  }
+
+  /** Each of your classes' next meeting, soonest first. */
+  private upcoming(): ClassOption[] {
+    return Object.entries(myClasses())
       .flatMap(([code, section]) => {
         const course = this.classes.course(code);
         const next = course && this.classes.next(course, section);
         return next ? [next] : [];
       })
       .sort((a, b) => a.startsAt!.getTime() - b.startsAt!.getTime());
-    if (!upcoming[0]) {
-      return { text: `I don't know your classes yet. Tell me one, like "I have MATH 20C at 11", and I'll remember your section.` };
+  }
+
+  /** "Add MATH 20C": pick the lecture, then the discussion or lab, and remember them. */
+  private addCourse(code: string | undefined): Reply {
+    if (!this.classes.term) return { text: "I don't have this term's class schedule, so I can't add classes." };
+    const course = code ? this.classes.course(code) : undefined;
+    if (!course) return { text: `I couldn't find ${code ?? "that course"} in the ${this.classes.term} schedule.` };
+    const groups = this.classes.groups(course);
+    if (groups.length === 1) return this.pickSub(course, groups[0]);
+    return {
+      text: `Which ${course.code} lecture are you in?`,
+      choices: groups.map((g) => ({
+        label: `${g.group}: ${g.lecture.map((m) => this.classes.meetingLine(m)).join("; ") || "no lecture listed"}`,
+        pick: async () => this.pickSub(course, g),
+      })),
+    };
+  }
+
+  private pickSub(course: CourseSections, group: SectionGroup): Reply {
+    const subs = [...group.subs];
+    if (subs.length <= 1) return this.added(course, subs[0]?.[0] ?? `${group.group}-000`);
+    return {
+      text: `And which discussion or lab?`,
+      choices: subs.map(([section, meetings]) => ({
+        label: meetings.map((m) => `${meetingType(m)} ${this.classes.meetingLine(m)}`).join("; "),
+        pick: async () => this.added(course, section),
+      })),
+    };
+  }
+
+  private added(course: CourseSections, section: string): Reply {
+    forgetCourse(course.code);
+    rememberSection(course.code, section);
+    return {
+      text: `Added ${course.code} (${course.title}).\n${this.sectionLines(course, section).join("\n")}`,
+      choices: [
+        { label: "My next class", pick: async () => this.nextClass() },
+        { label: "My classes", pick: async () => this.listClasses() },
+      ],
+    };
+  }
+
+  private dropCourse(code: string | undefined): Reply {
+    const course = code ? this.classes.course(code) : undefined;
+    const name = course?.code ?? code ?? "";
+    return { text: forgetCourse(name) ? `Dropped ${name}.` : `${name || "That course"} isn't in your classes.` };
+  }
+
+  /** Every class you've added: when and where it meets, and exams coming up. */
+  private listClasses(): Reply {
+    const mine = Object.entries(myClasses());
+    if (!mine.length) return { text: `You haven't added any classes. Try "add MATH 20C".` };
+    const blocks = mine.flatMap(([code, section]) => {
+      const course = this.classes.course(code);
+      return course ? [`${course.code}: ${course.title}\n${this.sectionLines(course, section).join("\n")}`] : [];
+    });
+    return {
+      text: `Your ${this.classes.term ?? ""} classes:\n\n${blocks.join("\n\n")}`,
+      choices: [
+        { label: "What do I have today?", pick: async () => this.dayPlan("today") },
+        { label: "Tomorrow?", pick: async () => this.dayPlan("tomorrow") },
+      ],
+    };
+  }
+
+  /** "What do I have tomorrow": that day's classes in order, each with a button to go. */
+  private dayPlan(dayWord: string | undefined): Reply {
+    const mine = Object.entries(myClasses());
+    if (!mine.length) return { text: `Add your classes first, like "add MATH 20C", and I'll tell you your day.` };
+    const day = dayFor(dayWord, new Date());
+    const name = dayWord === "tomorrow" ? "Tomorrow" : !dayWord || dayWord === "today" ? "Today" : day.toLocaleDateString([], { weekday: "long" });
+    const items = mine
+      .flatMap(([code, section]) => {
+        const course = this.classes.course(code);
+        return course ? this.classes.onDay(course, section, day) : [];
+      })
+      .sort((a, b) => a.startsAt!.getTime() - b.startsAt!.getTime());
+    if (!items.length) return { text: `${name}: no classes.` };
+    return {
+      text: `${name}:\n${items.map((o) => `${clock(o.startsAt!)}: ${describe(o)}`).join("\n")}`,
+      choices: items.map((o) => ({ label: `Go to ${o.course.code} (${clock(o.startsAt!)})`, pick: () => this.toOption(o, null) })),
+    };
+  }
+
+  /** "Lecture: MWF 11:00 AM, Mosaic 0114", the discussion, and exams still to come. */
+  private sectionLines(course: CourseSections, section: string): string[] {
+    const [group, sub] = section.split("-");
+    const g = this.classes.groups(course).find((x) => x.group === group);
+    const meetings = [...(g?.lecture ?? []), ...(g?.subs.get(`${group}-${sub}`) ?? [])];
+    // One line per exam: big ones are split across rooms ("Center Hall 101 or Mosaic 0114").
+    const exams = new Map<string, { label: string; rooms: string[] }>();
+    for (const e of this.classes.exams(course, section, new Date(), 120)) {
+      const label = `${meetingType(e.meeting)}: ${when(e.startsAt!)}`;
+      const exam = exams.get(label) ?? exams.set(label, { label, rooms: [] }).get(label)!;
+      exam.rooms.push(`${e.building.name} ${e.meeting.room ?? ""}`.trim());
     }
-    return this.toOption(upcoming[0], null);
+    return [
+      ...meetings.map((m) => `${meetingType(m)}: ${this.classes.meetingLine(m)}`),
+      ...[...exams.values()].map((e) => `${e.label}, ${e.rooms.join(" or ")}`),
+    ];
   }
 
   private toOption(option: ClassOption, target: Date | null): Promise<Reply> {
     const arriveBy = option.startsAt ?? target;
     const exams = this.classes
-      .exams(option.course, savedSections()[option.course.code] ?? option.meeting.section)
+      .exams(option.course, myClasses()[option.course.code] ?? option.meeting.section)
       .filter((e) => e.startsAt?.getTime() !== arriveBy?.getTime())
       .slice(0, 2)
       .map((e) => `Heads-up: ${describe(e)} on ${e.startsAt!.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} at ${clock(e.startsAt!)}.`);
@@ -230,6 +375,7 @@ export class Assistant {
       to: { endpoint: { kind: "building", building: option.building, room: option.meeting.room }, label: option.building.name },
       arriveBy,
       title: `${describe(option)}${arriveBy ? `, ${when(arriveBy)}` : ""}`,
+      name: describe(option),
       notes: exams,
     };
     return this.go();
@@ -238,7 +384,7 @@ export class Assistant {
   private toPlace(query: string, arriveBy: Date | null): Reply | Promise<Reply> {
     const place = this.find(query);
     if (!place) return { text: `I couldn't find "${query}" on campus.` };
-    this.trip = { to: place, arriveBy, title: `${place.label}${arriveBy ? `, by ${when(arriveBy)}` : ""}` };
+    this.trip = { to: place, arriveBy, title: `${place.label}${arriveBy ? `, by ${when(arriveBy)}` : ""}`, name: place.label };
     return this.go();
   }
 
@@ -271,6 +417,7 @@ export class Assistant {
       to: { endpoint: { kind: "point", lngLat: best.lngLat, label: best.name }, label: best.name },
       arriveBy: null,
       title: `Nearest ${kind.label} to ${around}: ${name(best)}`,
+      name: best.name,
       notes: others.length ? [`Also close: ${others.map((p) => `${name(p)}, ${distance(p.meters)}`).join("; ")}.`] : [],
     };
     // Near a named place: start from it unless we know where you are.
@@ -301,7 +448,7 @@ export class Assistant {
           label: `Walk to ${stop.name}`,
           pick: () => {
             this.mode = "walk";
-            this.trip = { to: { endpoint: { kind: "point", lngLat: stop.lngLat, label: stop.name }, label: stop.name }, arriveBy: null, title: stop.name };
+            this.trip = { to: { endpoint: { kind: "point", lngLat: stop.lngLat, label: stop.name }, label: stop.name }, arriveBy: null, title: stop.name, name: stop.name };
             return this.go();
           },
         },
@@ -321,7 +468,7 @@ export class Assistant {
       return { text: `${trip.title}. ${planned.error}` };
     }
     const route = planned.route;
-    this.view.trip({ from: from.endpoint, to: trip.to.endpoint, mode: this.mode, arriveBy: trip.arriveBy, title: trip.title, route });
+    this.view.trip({ from: from.endpoint, to: trip.to.endpoint, mode: this.mode, arriveBy: trip.arriveBy, title: trip.title, name: trip.name, route });
     const minutes = Math.ceil(planned.minutes);
     const how = planned.walkInstead ? "Walking is as fast as transit here" : MODES[this.mode].label;
     const lines = [
@@ -425,14 +572,15 @@ function leaveAdvice(route: Route, mode: TravelMode, minutes: number, arriveBy: 
   return late > 0 ? `Leave now: you'll be about ${late} min late.` : "Leave now to make it.";
 }
 
-/** "3:31 PM" today, "tomorrow 11:00 AM", "Wed 8:00 PM". */
+/** "3:31 PM" today, "tomorrow 11:00 AM", "Wed 8:00 PM" this week, "Wed, Nov 18, 8:00 PM" later. */
 function when(at: Date): string {
   const today = new Date();
   const tomorrow = new Date(today);
   tomorrow.setDate(today.getDate() + 1);
   if (at.toDateString() === today.toDateString()) return clock(at);
   if (at.toDateString() === tomorrow.toDateString()) return `tomorrow ${clock(at)}`;
-  return `${at.toLocaleDateString([], { weekday: "short" })} ${clock(at)}`;
+  if (at.getTime() - today.getTime() < 6 * 86_400_000) return `${at.toLocaleDateString([], { weekday: "short" })} ${clock(at)}`;
+  return `${at.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}, ${clock(at)}`;
 }
 
 /** Feet up close, miles farther: "350 ft", "0.4 mi". */
@@ -457,19 +605,8 @@ function endpoint(hit: SearchHit): Endpoint {
   return { kind: "building", building: hit.building, room: hit.room };
 }
 
-/** Sections the user picked, by course: next time "MATH 20C" goes straight to theirs. */
-function savedSections(): Record<string, string> {
-  try {
-    return JSON.parse(localStorage.getItem(SAVED_SECTIONS_KEY) ?? "{}") as Record<string, string>;
-  } catch {
-    return {};
-  }
-}
-
-function saveSection(course: string, section: string): void {
-  try {
-    localStorage.setItem(SAVED_SECTIONS_KEY, JSON.stringify({ ...savedSections(), [course]: section }));
-  } catch {
-    // Private window or blocked storage: just ask again next time.
-  }
+/** "Lecture", "Discussion", "Lab", "Midterm", "Final" */
+function meetingType(m: SectionMeeting): string {
+  if (m.kind !== "class") return m.kind === "midterm" ? "Midterm" : "Final";
+  return { LE: "Lecture", DI: "Discussion", LA: "Lab", SE: "Seminar" }[m.type] ?? m.type;
 }

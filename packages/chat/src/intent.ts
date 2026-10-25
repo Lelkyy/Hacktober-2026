@@ -11,11 +11,15 @@ export interface Intent {
    * route: get to a place ("take me to Geisel").
    * nearby: the nearest restroom, water, coffee, printer… ("where's the closest bathroom").
    * stop: when the next buses leave a stop ("next bus at Gilman").
-   * next: their next class, from the sections they've picked.
+   * next: their next class, from the classes they've added.
+   * add: add a course to their classes ("I'm taking MATH 20C").
+   * drop: remove a course ("drop CSE 12").
+   * classes: list their classes ("what are my classes").
+   * day: what they have on a day ("what do I have tomorrow").
    * change: change the last trip ("by bike instead", "I'm at Price Center").
    * other: anything else.
    */
-  action: "class" | "route" | "nearby" | "stop" | "next" | "change" | "other";
+  action: "class" | "route" | "nearby" | "stop" | "next" | "add" | "drop" | "classes" | "day" | "change" | "other";
   /** Course code as typed: "MATH 20C", "cse12". */
   course?: string;
   /** lecture, discussion, lab, midterm or final, when said. */
@@ -41,11 +45,13 @@ export type TravelMode = Extract<ModeId, "walk" | "accessible" | "bike" | "bus">
 
 export const TRAVEL_MODES: TravelMode[] = ["walk", "accessible", "bike", "bus"];
 
+const ACTIONS = ["class", "route", "nearby", "stop", "next", "add", "drop", "classes", "day", "change", "other"];
+
 /** The JSON Schema Gemma's answer must match (Chrome's responseConstraint, Ollama's format). */
 export const INTENT_SCHEMA = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["class", "route", "nearby", "stop", "next", "change", "other"] },
+    action: { type: "string", enum: ACTIONS },
     course: { type: "string" },
     meeting: { type: "string", enum: ["lecture", "discussion", "lab", "midterm", "final"] },
     place: { type: "string" },
@@ -71,6 +77,10 @@ Only copy what the message says; never invent rooms, buildings or times. Leave o
 - action "nearby": they want the closest restroom, water refill, coffee, food, vending machine, printer, study spot, computer lab, parking, EV charger, bike rack, Spin hub, ATM, mailbox, laundry, lactation room, AED or clinic. what = one word for it. place = "near X" if said.
 - action "stop": they ask when buses or shuttles leave a stop. place = the stop (leave out for "near me").
 - action "next": they ask about their next class without naming it ("where's my next class").
+- action "add": they say they take a course, to remember it ("I'm taking MATH 20C", "add CSE 12"). course = the code.
+- action "drop": they want a course removed ("drop CSE 12", "I'm not taking PHYS 2A anymore"). course = the code.
+- action "classes": they ask which classes they take ("what are my classes", "my schedule").
+- action "day": they ask what they have on a day ("what do I have tomorrow", "my classes on Monday"). day = that day.
 - action "change": they're changing the last trip without naming a new destination (a new mode, a new start, a new time).
 - action "other": anything else; put a one-sentence friendly reply in "reply" saying what you can do (directions to classes and campus places, the nearest restroom/water/food, bus times).
 - from: where they start ("from Geisel", "I'm at Price Center" -> "Price Center").
@@ -86,6 +96,9 @@ Examples:
 "I need coffee near WLH" -> {"action":"nearby","what":"coffee","place":"WLH"}
 "when's the next bus at Gilman" -> {"action":"stop","place":"Gilman"}
 "where's my next class" -> {"action":"next"}
+"I'm taking math 20c and want to add it" -> {"action":"add","course":"MATH 20C"}
+"drop cse 12" -> {"action":"drop","course":"CSE 12"}
+"what do I have tomorrow" -> {"action":"day","day":"tomorrow"}
 "actually I'll take the bus" -> {"action":"change","mode":"bus"}
 "I'm at the Warren Lecture Hall" -> {"action":"change","from":"Warren Lecture Hall"}`;
 }
@@ -95,7 +108,7 @@ export function cleanIntent(raw: unknown): Intent | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const action = r.action;
-  if (typeof action !== "string" || !["class", "route", "nearby", "stop", "next", "change", "other"].includes(action)) return null;
+  if (typeof action !== "string" || !ACTIONS.includes(action)) return null;
   const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
   const intent: Intent = { action: action as Intent["action"] };
   intent.course = text(r.course);
@@ -185,7 +198,14 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
 
   const near = text.match(new RegExp(String.raw`\b(?:near|by|around|close to|next to)\s+(?:the\s+)?(.+?)${stopWords}`));
   const kind = /\b(nearest|closest|nearby|near|where can i|where's a|where is a|i need (?!to\b)|find (?:a|me)|any)\b/.test(text) ? nearbyKind(text) : undefined;
-  if (intent.course) intent.action = "class";
+  const myDay = /\b(what do i have|what'?s on|my day|my classes (today|tomorrow|on)|(classes|schedule) (today|tomorrow|on \w+))\b/.test(text);
+  if (intent.course && /\b(add|taking|i take|enroll(ed)?( in)?|register(ed)?( for)?|sign me up)\b/.test(text)) intent.action = "add";
+  else if (intent.course && /\b(drop|dropped|remove|delete|forget|not taking|no longer)\b/.test(text)) intent.action = "drop";
+  else if (intent.course) intent.action = "class";
+  else if (myDay) {
+    intent.action = "day";
+    intent.day ??= "today";
+  } else if (/\b(my classes|my courses|my schedule|what classes|which classes|what am i taking)\b/.test(text)) intent.action = "classes";
   else if (kind) {
     intent.action = "nearby";
     intent.what = kind.id;

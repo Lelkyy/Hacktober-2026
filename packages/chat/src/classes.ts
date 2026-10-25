@@ -11,6 +11,15 @@ export interface ClassOption {
   startsAt: Date | null;
 }
 
+/** A lecture group of a course, and the discussions or labs you pick within it. */
+export interface SectionGroup {
+  /** "001" */
+  group: string;
+  lecture: SectionMeeting[];
+  /** "001-003" -> that discussion's meetings. */
+  subs: Map<string, SectionMeeting[]>;
+}
+
 export interface ClassAnswer {
   /** Exactly one fits. */
   pick?: ClassOption;
@@ -117,6 +126,35 @@ export class ClassFinder {
     return distinctRooms(found);
   }
 
+  /** What `section` of `course` has on `day` (classes, and exams on their date), in time order. */
+  onDay(course: CourseSections, section: string, day: Date): ClassOption[] {
+    return distinctRooms(this.options(course, day).filter((o) => sameSection(o.meeting.section, section))).sort(
+      (a, b) => a.startsAt!.getTime() - b.startsAt!.getTime(),
+    );
+  }
+
+  /**
+   * A course's lecture groups ("001", "002"…), each with its lecture meetings
+   * and its discussions or labs ("001-003" -> that one's meetings).
+   */
+  groups(course: CourseSections): SectionGroup[] {
+    const groups = new Map<string, SectionGroup>();
+    for (const m of course.meetings.map(expandMeeting)) {
+      if (m.kind !== "class") continue;
+      const [group, sub = "000"] = m.section.split("-");
+      const g = groups.get(group) ?? groups.set(group, { group, lecture: [], subs: new Map() }).get(group)!;
+      if (sub === "000") g.lecture.push(m);
+      else g.subs.set(`${group}-${sub}`, [...(g.subs.get(`${group}-${sub}`) ?? []), m]);
+    }
+    return [...groups.values()].sort((a, b) => a.group.localeCompare(b.group));
+  }
+
+  /** "MWF 8:00 AM, Peterson Hall 110" */
+  meetingLine(m: SectionMeeting): string {
+    const where = m.building ? `${this.campus.buildingByCode.get(m.building)?.name ?? m.building} ${m.room ?? ""}`.trim() : "room not listed";
+    return `${m.days.join("")} ${hhmm(m.start)}, ${where}`;
+  }
+
   /** Every meeting of `course` on `day`, with its building on the map. */
   private options(course: CourseSections, day: Date): ClassOption[] {
     return course.meetings.map(expandMeeting).flatMap((meeting) => {
@@ -131,6 +169,14 @@ export class ClassFinder {
 export function describe(o: ClassOption): string {
   const what = o.meeting.kind === "class" ? { LE: "lecture", DI: "discussion", LA: "lab", SE: "seminar" }[o.meeting.type] ?? o.meeting.type : o.meeting.kind;
   return `${o.course.code} ${what}, ${o.building.name} ${o.meeting.room ?? ""}`.trim();
+}
+
+/** "13:05" -> "1:05 PM" */
+export function hhmm(time: string): string {
+  const [h, m] = time.split(":").map(Number);
+  const at = new Date();
+  at.setHours(h, m, 0, 0);
+  return clock(at);
 }
 
 export function clock(at: Date): string {

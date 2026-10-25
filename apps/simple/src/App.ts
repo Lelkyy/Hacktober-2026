@@ -60,14 +60,7 @@ export class App {
       settings,
     });
 
-    const term = this.campus.sections?.term;
-    this.say("bot", {
-      text: `Hi! Tell me where you need to be and I'll route you there.${term ? ` I know every ${term} class.` : ""}`,
-      choices: ["I have MATH 20C tomorrow at 11", "Nearest restroom", "Next bus at Gilman", "Take me to Geisel by bike"].map((example) => ({
-        label: example,
-        pick: () => this.assistant.handle(example),
-      })),
-    });
+    this.say("bot", this.assistant.greeting(["What do I have today?", "Nearest restroom", "Next bus at Gilman", "Add MATH 20C"]));
     this.form.addEventListener("submit", (event) => {
       event.preventDefault();
       const text = this.prompt.value.trim();
