@@ -7,11 +7,7 @@ import { App } from "./App.ts";
 setWorkerUrl(workerUrl);
 
 const status = document.querySelector<HTMLElement>("#status")!;
-const app = new App({
-  status,
-  stop: document.querySelector<HTMLElement>("#stop")!,
-  trip: document.querySelector<HTMLElement>("#trip")!,
-});
+const app = new App(status);
 
 app.start().catch((err: unknown) => {
   status.textContent = err instanceof Error ? err.message : "Could not start.";
