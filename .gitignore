@@ -1,0 +1,24 @@
+# Dependencies and build output
+node_modules/
+dist/
+build/
+.expo/
+.vite/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+
+# Map/data caches and private schedule data (from a login-only system; not shared)
+data/raw/
+data/private/
+apps/web/public/data/sections.json
+.claude/
