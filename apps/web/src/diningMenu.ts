@@ -118,6 +118,13 @@ export function localDate(now = new Date()): string {
   return `${y}-${m}-${d}`;
 }
 
+/** A calendar day, moved by `days` (negative goes backward). */
+export function addDays(iso: string, days: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const date = new Date(y, (m ?? 1) - 1, (d ?? 1) + days);
+  return localDate(date);
+}
+
 /** The menu day to show: today, or the same weekday from the file when today isn't in it. */
 export function menuDate(menus: DiningMenus, now = new Date()): string {
   const today = localDate(now);
@@ -141,6 +148,43 @@ export function hoursOn(station: DiningStation, iso: string): string | null {
   if (!row) return null;
   if (row.open === "Closed" || row.close === "Closed") return "Closed";
   return `${row.open} – ${row.close}`;
+}
+
+/** The station whose hours are the hall's, when one is named for the hall. */
+export function hallClock(hall: DiningHall): DiningStation | null {
+  return hall.stations.find((s) => nameKey(s.name) === nameKey(hall.name)) ?? hall.stations[0] ?? null;
+}
+
+function clockMinutes(label: string): number | null {
+  const match = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(label.trim());
+  if (!match) return null;
+  let hour = Number(match[1]) % 12;
+  if (match[3].toUpperCase() === "PM") hour += 12;
+  return hour * 60 + Number(match[2]);
+}
+
+/** True when `now`'s clock falls inside this station's hours for `iso`, including a close after midnight. */
+export function isOpenAt(station: DiningStation, iso: string, now = new Date()): boolean {
+  const row = station.hours.find((h) => h.day === weekday(iso));
+  if (row && spans(row, now, false)) return true;
+  const yesterday = station.hours.find((h) => h.day === weekday(addDays(iso, -1)));
+  return !!yesterday && spans(yesterday, now, true);
+}
+
+function spans(row: DiningHours, now: Date, overnightOnly: boolean): boolean {
+  if (row.open === "Closed" || row.close === "Closed") return false;
+  const open = clockMinutes(row.open);
+  const close = clockMinutes(row.close);
+  if (open == null || close == null) return false;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  if (close > open) return !overnightOnly && cur >= open && cur < close;
+  if (close === open) return false;
+  return overnightOnly ? cur < close : cur >= open;
+}
+
+/** A hall is open when any of its stations is. */
+export function hallIsOpen(hall: DiningHall, iso: string, now = new Date()): boolean {
+  return hall.stations.some((station) => isOpenAt(station, iso, now));
 }
 
 /** When this station next opens, if it is closed on `iso`. */

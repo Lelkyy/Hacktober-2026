@@ -12,10 +12,11 @@ import {
   type DiningStation,
 } from "./diningMenu.ts";
 
-/** One hall: each station's hours, then that station's menu. */
-export function DiningMenu({ menus, match }: { menus: DiningMenus; match: DiningMatch }) {
-  const date = menuDate(menus);
+/** One hall: each station's hours, then that station's menu. `date` picks the day; otherwise today (or the saved same weekday). */
+export function DiningMenu({ menus, match, date: dateProp, bare }: { menus: DiningMenus; match: DiningMatch; date?: string; bare?: boolean }) {
+  const date = dateProp ?? menuDate(menus);
   const today = localDate();
+  const saved = !dateProp && date !== today;
   const { hall } = match;
   const root = useRef<HTMLElement>(null);
   const stations = useMemo(() => {
@@ -58,13 +59,17 @@ export function DiningMenu({ menus, match }: { menus: DiningMenus; match: Dining
   const showing = items.filter((item) => item.meal === meal);
 
   return (
-    <section className="dining" aria-label={`Menu at ${hall.name}`} ref={root}>
-      <p className="dining-title">{stations.length === 1 ? stations[0].name : hall.name}</p>
-      <p className="dining-hours">
-        {formatMenuDate(date)}
-        {date !== today ? " (saved menu)" : ""}
-        {hours ? ` · ${hours === "Closed" ? "Closed" : `Open ${hours}`}` : ""}
-      </p>
+    <section className={`dining ${bare ? "bare" : ""}`} aria-label={`Menu at ${hall.name}`} ref={root}>
+      {!bare && (
+        <>
+          <p className="dining-title">{stations.length === 1 ? stations[0].name : hall.name}</p>
+          <p className="dining-hours">
+            {formatMenuDate(date)}
+            {saved ? " (saved menu)" : ""}
+            {hours ? ` · ${hours === "Closed" ? "Closed" : `Open ${hours}`}` : ""}
+          </p>
+        </>
+      )}
       {stations.length > 1 && (
         <div className="dining-stations" role="tablist" aria-label="Stations">
           {stations.map((s) => (
@@ -95,7 +100,10 @@ export function DiningMenu({ menus, match }: { menus: DiningMenus; match: Dining
                   {item.name}
                   {item.category && item.category !== "Menu Items" ? <span className="muted"> · {item.category}</span> : null}
                 </span>
-                {item.price != null && <span className="dining-price">{money(item.price)}</span>}
+                <span className="dining-meta">
+                  {stationLine && <span className="dining-when">{stationLine === "Closed" ? "Closed" : stationLine}</span>}
+                  {item.price != null && <span className="dining-price">{money(item.price)}</span>}
+                </span>
               </li>
             ))}
           </ul>
