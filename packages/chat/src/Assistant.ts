@@ -222,15 +222,15 @@ export class Assistant {
   greeting(examples: string[]): Reply {
     const term = this.classes.term;
     const next = this.upcoming()[0];
-    const lines = [`Hi! Tell me where you need to be and I'll route you there.${term ? ` I know every ${term} class.` : ""}`];
-    if (next) lines.push(`Next up: ${describe(next)}, ${when(next.startsAt!)}.`);
-    else if (term) lines.push(`Add your classes ("add MATH 20C") and I'll keep track of them.`);
+    const text = next
+      ? `Next up: ${describe(next)}, ${when(next.startsAt!)}.`
+      : `Tell me where you need to be${term ? `, or add a class ("add MATH 20C")` : ""}.`;
     return {
-      text: lines.join("\n"),
+      text,
       choices: [
         ...(next ? [{ label: `Take me to ${next.course.code}`, pick: () => this.toOption(next, null) }] : []),
         ...examples.map((example) => ({ label: example, pick: () => this.handle(example) })),
-      ],
+      ].slice(0, 3),
     };
   }
 

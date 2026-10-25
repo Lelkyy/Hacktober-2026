@@ -1193,6 +1193,12 @@ export function App() {
                     <LiveTransitButton mode="trolley" on={liveModes.trolley} loading={liveLoading && liveModes.trolley} onToggle={() => toggleLive("trolley")} />
                     <LiveTransitButton mode="bus" on={liveModes.bus} loading={liveLoading && liveModes.bus} onToggle={() => toggleLive("bus")} />
                   </div>
+                  <p className="credits">
+                    © OpenStreetMap, UC San Diego Campus Map, Triton Transit and MTS schedules. Unofficial.{" "}
+                    <button className="link" onClick={() => openReport(false)}>
+                      Report a problem
+                    </button>
+                  </p>
                 </div>
               </details>
             </>
@@ -1212,14 +1218,6 @@ export function App() {
           )}
         </div>
 
-        <footer className="sheet-foot">
-          <span>© OpenStreetMap · UC San Diego Campus Map · Triton Transit &amp; MTS schedules · Unofficial</span>
-          {tab !== "report" && !navigating && (
-            <button className="link" onClick={() => openReport(false)}>
-              Report a problem
-            </button>
-          )}
-        </footer>
       </aside>
     </div>
     {/* Hidden, not removed, while navigating: the conversation stays. */}

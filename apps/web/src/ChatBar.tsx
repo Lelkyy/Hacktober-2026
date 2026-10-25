@@ -2,6 +2,7 @@ import { Assistant, ChatModel, Location, TripPlanner, type ChatCampus, type Chat
 import { courseKey, type LiveVehicle } from "@campus/core";
 import { useEffect, useImperativeHandle, useRef, useState, type FormEvent, type Ref } from "react";
 import { CHAT } from "./config.ts";
+import { ChevronIcon } from "./Icons.tsx";
 
 interface Message {
   id: number;
@@ -17,7 +18,7 @@ export interface ChatHandle {
   run(label: string, work: (assistant: Assistant) => Reply | Promise<Reply>): void;
 }
 
-const EXAMPLES = ["What do I have today?", "Nearest restroom", "Next bus at Gilman", "Add MATH 20C"];
+const EXAMPLES = ["What do I have today?", "Nearest restroom", "Next bus at Gilman"];
 
 /**
  * The chat bar under the map: say where you need to be ("I have MATH 20C in 30
@@ -121,17 +122,9 @@ export function ChatBar({
   return (
     <section className="chatbar" aria-label="Chat">
       <div className="chatbar-inner">
-        {messages.length > 0 && (
-          <div className="chatbar-head">
-            <span className="chatbar-status">{status}</span>
-            <button className="link" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
-              {open ? "Hide chat" : `Show chat (${messages.length})`}
-            </button>
-          </div>
-        )}
         {open && messages.length > 0 && (
           <ol className="chat-log" ref={list} aria-live="polite">
-            {messages.map((m) => (
+            {messages.map((m, i) => (
               <li key={m.id} className={`chat-msg ${m.who}`}>
                 {m.reply.text}
                 {m.reply.steps && m.reply.steps.length > 0 && (
@@ -144,12 +137,14 @@ export function ChatBar({
                     </ol>
                   </details>
                 )}
-                {m.reply.choices && m.reply.choices.length > 0 && (
+                {/* Only the latest answer's buttons: older ones are spent or stale. A trip's
+                    other ways to travel are left out: the panel's mode strip has them. */}
+                {i === messages.length - 1 && !m.used && !m.reply.steps && m.reply.choices && m.reply.choices.length > 0 && (
                   <div className="chat-choices">
                     {m.reply.choices.map((choice) => (
                       <button
                         key={choice.label}
-                        disabled={m.used || busy}
+                        disabled={busy}
                         onClick={() => {
                           setMessages((all) => all.map((x) => (x.id === m.id ? { ...x, used: true } : x)));
                           void ask(choice.label, choice.pick);
@@ -165,8 +160,21 @@ export function ChatBar({
             {busy && <li className="chat-msg bot thinking">Thinking…</li>}
           </ol>
         )}
-        <form className="chat-ask" onSubmit={submit}>
-          <img src="/logo-mark.png" alt="" width="22" height="27" className="chat-mark" />
+        {/* Model news worth seeing (a download under way); the rest sits on the input's tooltip. */}
+        {status.includes("…") && ready && <p className="chat-status">{status}</p>}
+        <form className="chat-ask" onSubmit={submit} title={ready ? status : undefined}>
+          {messages.length > 1 && (
+            <button
+              type="button"
+              className="icon-btn chat-toggle"
+              onClick={() => setOpen((v) => !v)}
+              aria-expanded={open}
+              aria-label={open ? "Hide conversation" : "Show conversation"}
+              title={open ? "Hide conversation" : "Show conversation"}
+            >
+              <ChevronIcon up={!open} />
+            </button>
+          )}
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
