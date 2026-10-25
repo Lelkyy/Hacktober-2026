@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { freeVehicles } from "./gbfs.ts";
+import { clusterVehicles, freeVehicles } from "./gbfs.ts";
 
 describe("GBFS vehicles", () => {
   const types = {
@@ -29,5 +29,22 @@ describe("GBFS vehicles", () => {
       { id: "a", kind: "ebike", lngLat: [-117.24, 32.88], battery: 0.7, rangeMeters: 40000 },
       { id: "b", kind: "scooter", lngLat: [-117.24, 32.88], battery: undefined, rangeMeters: undefined },
     ]);
+  });
+
+  it("groups scooters a few meters apart and keeps the fullest battery", () => {
+    const here: [number, number] = [-117.24, 32.88];
+    const beside: [number, number] = [-117.24 + 8 / 93000, 32.88];
+    const far: [number, number] = [-117.24 + 80 / 93000, 32.88];
+    const groups = clusterVehicles([
+      { id: "low", kind: "scooter", lngLat: here, battery: 0.2 },
+      { id: "full", kind: "scooter", lngLat: beside, battery: 0.9 },
+      { id: "other", kind: "scooter", lngLat: far, battery: 0.4 },
+      { id: "bike", kind: "ebike", lngLat: here, battery: 0.5 },
+    ]);
+    const pile = groups.find((g) => g.count === 2);
+    expect(pile?.vehicle.id).toBe("full");
+    expect(pile?.battery).toBe(0.9);
+    expect(groups.filter((g) => g.kind === "scooter")).toHaveLength(2);
+    expect(groups.find((g) => g.kind === "ebike")?.count).toBe(1);
   });
 });

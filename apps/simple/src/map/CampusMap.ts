@@ -38,6 +38,8 @@ export class CampusMap {
       maxBounds: campusBounds(bbox),
     });
     this.map.addControl(new NavigationControl(), "top-right");
+    // The chat bar grows with the conversation; the map takes what's left.
+    new ResizeObserver(() => this.map.resize()).observe(container);
     this.ready = new Promise((resolve) => this.map.on("load", () => {
       this.addLayers();
       resolve();
@@ -128,6 +130,25 @@ export class CampusMap {
     this.map.fitBounds(bounds, { padding: panelPadding(), maxZoom: 17.5, duration: 600 });
   }
 
+  /** You, as a blue dot. */
+  async showMe(at: LngLat): Promise<void> {
+    await this.ready;
+    this.source("me").setData({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: at } });
+  }
+
+  /** Labelled dots (the nearest restrooms, say). Empty to clear. */
+  async showMarkers(points: { lngLat: LngLat; label: string }[]): Promise<void> {
+    await this.ready;
+    this.source("markers").setData({
+      type: "FeatureCollection",
+      features: points.map((p) => ({
+        type: "Feature" as const,
+        properties: { label: p.label },
+        geometry: { type: "Point" as const, coordinates: p.lngLat },
+      })),
+    });
+  }
+
   focus(at: LngLat): void {
     this.map.flyTo({ center: at, zoom: Math.max(this.map.getZoom(), 16) });
   }
@@ -137,7 +158,7 @@ export class CampusMap {
   }
 
   private addLayers(): void {
-    for (const id of ["lines", "highlight", "trip", "stops", "vehicles"]) {
+    for (const id of ["lines", "highlight", "trip", "stops", "vehicles", "markers", "me"]) {
       this.map.addSource(id, { type: "geojson", data: EMPTY });
     }
     this.map.addLayer({
@@ -182,6 +203,31 @@ export class CampusMap {
       paint: { "circle-radius": 8, "circle-color": ["get", "color"], "circle-stroke-color": "#fff", "circle-stroke-width": 2 },
     });
     this.map.addLayer({
+      id: "markers",
+      type: "circle",
+      source: "markers",
+      paint: { "circle-radius": 7, "circle-color": "#d9732b", "circle-stroke-color": "#fff", "circle-stroke-width": 2 },
+    });
+    this.map.addLayer({
+      id: "marker-labels",
+      type: "symbol",
+      source: "markers",
+      layout: { "text-field": ["get", "label"], "text-size": 12, "text-font": ["Noto Sans Regular"], "text-offset": [0, 1.3], "text-anchor": "top", "text-max-width": 10 },
+      paint: { "text-color": "#17301b", "text-halo-color": "#fff", "text-halo-width": 1.5 },
+    });
+    this.map.addLayer({
+      id: "me-halo",
+      type: "circle",
+      source: "me",
+      paint: { "circle-radius": 16, "circle-color": "#2b7bb9", "circle-opacity": 0.18 },
+    });
+    this.map.addLayer({
+      id: "me",
+      type: "circle",
+      source: "me",
+      paint: { "circle-radius": 7, "circle-color": "#2b7bb9", "circle-stroke-color": "#fff", "circle-stroke-width": 2.5 },
+    });
+    this.map.addLayer({
       id: "vehicle-labels",
       type: "symbol",
       source: "vehicles",
@@ -191,10 +237,9 @@ export class CampusMap {
   }
 }
 
-/** Map space the panel covers, so "the middle" and the edges are where you can see them. */
+/** Room around a fitted trip. The chat sits below the map, so nothing covers it. */
 function panelPadding(): { top: number; right: number; bottom: number; left: number } {
-  if (window.innerWidth > 760) return { top: 60, right: 70, bottom: 60, left: 364 };
-  return { top: Math.round(window.innerHeight * 0.5), right: 40, bottom: 40, left: 40 };
+  return window.innerWidth > 760 ? { top: 60, right: 70, bottom: 60, left: 70 } : { top: 40, right: 40, bottom: 40, left: 40 };
 }
 
 function pxPerDegree(zoom: number): number {

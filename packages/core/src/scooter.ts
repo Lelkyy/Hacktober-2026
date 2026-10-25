@@ -94,15 +94,36 @@ export function canPark(zones: RideZone[], p: LngLat): boolean {
   return !zones.length || (zoneAt(zones, p)?.park ?? false);
 }
 
-/** Each edge's speed limit from the zones (at its middle), m/s: 0 where you can't ride, Infinity for none. */
+/** Every zone that contains `p`, in feed order. */
+function zonesAt(zones: RideZone[], p: LngLat): RideZone[] {
+  return zones.filter(
+    (z) =>
+      p[0] >= z.bbox[0] &&
+      p[1] >= z.bbox[1] &&
+      p[0] <= z.bbox[2] &&
+      p[1] <= z.bbox[3] &&
+      z.polygons.some(([outer, ...holes]) => inRing(p, outer) && !holes.some((h) => inRing(p, h))),
+  );
+}
+
+/**
+ * Each edge's speed limit from the zones (at its middle), m/s.
+ * 0 where any overlapping zone stops the motor. Otherwise the lowest `maximum_speed_kph`
+ * among the zones that cover it, so a slow zone still counts when a wider zone is listed first.
+ * Infinity where the feed sets no cap (the scooter profile's own 15 mph cap still applies).
+ */
 export function zoneLimits(graph: CampusGraph, zones: RideZone[]): Float32Array {
   const limits = new Float32Array(graph.edgeCount).fill(Infinity);
   if (!zones.length) return limits;
   for (let e = 0; e < graph.edgeCount; e++) {
     const [a, b] = [graph.edgeFrom[e], graph.edgeTo[e]];
-    const zone = zoneAt(zones, [(graph.lon[a] + graph.lon[b]) / 2, (graph.lat[a] + graph.lat[b]) / 2]);
-    if (zone && !zone.through) limits[e] = 0;
-    else if (zone?.maxKph) limits[e] = zone.maxKph / 3.6;
+    const covering = zonesAt(zones, [(graph.lon[a] + graph.lon[b]) / 2, (graph.lat[a] + graph.lat[b]) / 2]);
+    if (!covering.length) continue;
+    if (covering.some((z) => !z.through)) limits[e] = 0;
+    else {
+      const caps = covering.flatMap((z) => (z.maxKph ? [z.maxKph] : []));
+      if (caps.length) limits[e] = Math.min(...caps) / 3.6;
+    }
   }
   return limits;
 }

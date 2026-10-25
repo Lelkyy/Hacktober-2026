@@ -266,7 +266,8 @@ export const PROFILES = {
     speed: {
       [EdgeKind.Bike]: SCOOTER,
       [EdgeKind.Road]: SCOOTER,
-      [EdgeKind.Sidewalk]: SCOOTER,
+      // California: not on the sidewalk. Walking it here makes the trip take the road or a bike path.
+      [EdgeKind.Sidewalk]: PUSH,
       [EdgeKind.BikeOnly]: SCOOTER,
       [EdgeKind.Shared]: SHARED_PATH_LIMIT,
       [EdgeKind.Path]: PUSH,

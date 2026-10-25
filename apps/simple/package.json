@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@campus/chat": "^0.1.0",
     "@campus/core": "^0.1.0",
     "maplibre-gl": "^6.12.0"
   },
