@@ -21,7 +21,6 @@ import {
   Marker,
   NavigationControl,
   Popup,
-  ScaleControl,
   setWorkerUrl,
   type ExpressionSpecification,
   type GeoJSONSource,
@@ -201,7 +200,6 @@ export function MapView(props: MapViewProps) {
     });
     map.addControl(geolocate, "top-right");
     geolocate.on("geolocate", (pos) => callbacks.current.onLocate([pos.coords.longitude, pos.coords.latitude]));
-    map.addControl(new ScaleControl({ unit: "imperial" }), "bottom-right");
 
     markers.current = {
       from: new Marker({ color: PALETTE.sageDeep }),
@@ -1208,12 +1206,19 @@ function visibleCenter(at: LngLat, zoom: number): LngLat {
   return [at[0] - (pad.left - pad.right) / 2 / perDeg, at[1] - ((pad.bottom - pad.top) / 2) * (cos / perDeg)];
 }
 
+/** Room around what the map fits: clear of the panel and the chat, wherever they sit. */
 function fitPadding() {
-  if (window.innerWidth > 760) return { top: 60, right: 70, bottom: 60, left: 440 };
-  // The map's own height: the chat bar takes the bottom of the window.
-  const height = document.querySelector<HTMLElement>(".app")?.clientHeight ?? window.innerHeight;
-  // The panel covers the bottom 36% (styles.css, .sheet on phones).
-  return { top: 70, right: 40, bottom: Math.round(height * 0.4), left: 40 };
+  const sheet = document.querySelector<HTMLElement>(".sheet")?.getBoundingClientRect();
+  const chat = document.querySelector<HTMLElement>(".chatbar")?.getBoundingClientRect();
+  if (window.innerWidth > 760) {
+    // The panel floats on the left, the chat card along the bottom.
+    const bottom = chat ? window.innerHeight - chat.top + 24 : 60;
+    return { top: 60, right: 70, bottom, left: (sheet?.right ?? 360) + 32 };
+  }
+  // Phones: the panel is a sheet over the bottom of the map (the chat bar is under the map).
+  const app = document.querySelector<HTMLElement>(".app")?.getBoundingClientRect();
+  const covered = sheet && app ? app.bottom - sheet.top : (app?.height ?? window.innerHeight) * 0.4;
+  return { top: 70, right: 40, bottom: Math.round(covered + 24), left: 40 };
 }
 
 /** Your position: a dot with a cone for the way you face (shown once a heading is known). */
