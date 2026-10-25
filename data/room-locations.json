@@ -1,4 +1,4 @@
 {
-  "_about": "Where rooms are, for buildings without indoor maps. Keys are 'CODE ROOM' (e.g. 'WLH 2001'); 'at' is [longitude, latitude] of the room, 'level' its floor as OSM counts it (0 = ground). Students send these from the app's 'Pin this room' button.",
+  "_about": "Hand-placed rooms for buildings without an indoor map. The graph build reads rooms. Keys are 'CODE ROOM' (e.g. 'WLH 2001'); 'at' is [longitude, latitude] of the room, 'level' its floor as OSM counts it (0 = ground).",
   "rooms": {}
 }
