@@ -231,6 +231,41 @@ button.link.danger { color: var(--danger); }
 }
 .spin-chip.on { box-shadow: 0 0 0 3px #ff5a1f, var(--shadow); }
 .spin-mark.loading { animation: spin-pulse 1s ease-in-out infinite; }
+.spin-pin {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  line-height: 0;
+  overflow: visible;
+}
+.spin-count {
+  position: absolute;
+  right: -6px;
+  top: -7px;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: #17301b;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 14px;
+  text-align: center;
+}
+.spin-park {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 2px solid #ff5a1f;
+  border-radius: 4px;
+  background: #fff;
+  color: #ff5a1f;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 14px;
+  cursor: default;
+}
 @keyframes spin-pulse { 50% { opacity: 0.55; } }
 @media (prefers-reduced-motion: reduce) { .spin-mark.loading { animation: none; } }
 
@@ -370,8 +405,8 @@ button.link.danger { color: var(--danger); }
   filter: drop-shadow(0 1px 2px rgba(23, 48, 27, 0.35));
 }
 .stop-badge svg { display: block; width: 100%; height: 100%; }
+/* Marker roots keep MapLibre's absolute positioning. Setting position here makes the pins slide when the map moves. */
 .stop-mark {
-  position: relative;
   padding: 0;
   border: none;
   border-radius: 50%;
