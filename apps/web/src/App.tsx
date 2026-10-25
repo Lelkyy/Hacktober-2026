@@ -84,6 +84,7 @@ import { PlaceNamer } from "./PlaceNamer.tsx";
 import { ReportPanel, type RouteContext } from "./ReportPanel.tsx";
 import { HOME_ID, useSavedPlaces } from "./useSavedPlaces.ts";
 import { NextUp, SchedulePanel, type ScheduleView } from "./SchedulePanel.tsx";
+import { ChatPanel } from "./ChatPanel.tsx";
 import { useSchedule } from "./useSchedule.ts";
 
 /** Suggest transit while walking only when it saves at least this much time. */
@@ -96,7 +97,7 @@ const MODE_ICONS: Record<ModeId, () => JSX.Element> = { walk: WalkIcon, accessib
 /** Spin's orange, for scooter rides on the map. */
 const SPIN_COLOR = "#FF5A1F";
 
-type Tab = "go" | "schedule" | "report";
+type Tab = "go" | "schedule" | "chat" | "report";
 
 export function App() {
   const [data, setData] = useState<CampusData | null>(null);
@@ -928,6 +929,16 @@ export function App() {
               Schedule
               {schedule.meetings.length > 0 && <span className="count">{new Set(schedule.meetings.map((m) => m.course)).size}</span>}
             </button>
+            <button
+              className={tab === "chat" ? "on" : ""}
+              aria-current={tab === "chat"}
+              onClick={() => {
+                setTab("chat");
+                if (MTS_LIVE) setLiveModes({ trolley: true, bus: true });
+              }}
+            >
+              Chat
+            </button>
           </nav>
         </header>
 
@@ -1225,6 +1236,23 @@ export function App() {
                 </p>
               )}
             </>
+          ) : tab === "chat" ? (
+            <ChatPanel
+              vehicles={live?.vehicles ?? []}
+              onApply={({ from: start, to: dest, mode: travel }) => {
+                setFrom(start);
+                setTo(dest);
+                setMode(travel);
+              }}
+              onStop={(id, at) => {
+                const stop = data.transit.data.stops.find((s) => s.id === id);
+                if (!stop) return;
+                setOpenStop(stop);
+                setShowTransitStops(true);
+                setFocus({ at, zoom: 17.2, key: Date.now() });
+              }}
+              onFocus={(at) => setFocus({ at, zoom: 16.5, key: Date.now() })}
+            />
           ) : tab === "schedule" ? (
             <SchedulePanel
               data={data}

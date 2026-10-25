@@ -35,6 +35,11 @@ export interface Intent {
   day?: string;
   /** A short friendly answer for "other". */
   reply?: string;
+  /**
+   * Lasting facts from this message only ("Usually bikes", "Usually starts at Sixth").
+   * Left out for a one-off trip.
+   */
+  remember?: string[];
 }
 
 export type TravelMode = Extract<ModeId, "walk" | "accessible" | "bike" | "bus">;
@@ -56,16 +61,20 @@ export const INTENT_SCHEMA = {
     at: { type: "string", pattern: "^[0-2]?[0-9]:[0-5][0-9]$" },
     day: { type: "string" },
     reply: { type: "string" },
+    remember: { type: "array", items: { type: "string" } },
   },
   required: ["action"],
 } as const;
 
-/** Instructions for Gemma. `now` so it can turn "at 3" into "15:00" sensibly. */
-export function systemPrompt(now: Date): string {
+/** Instructions for Gemma. `now` so it can turn "at 3" into "15:00" sensibly. `facts` are details already remembered. */
+export function systemPrompt(now: Date, facts: string[] = []): string {
   const today = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
   const time = now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  const known = facts.length
+    ? `\nFacts already remembered. Use them when this message doesn't say otherwise: if a fact says how they travel, set mode; if it says where they usually start, set from. Don't put those facts in remember again.\n${facts.map((f) => `- ${f}`).join("\n")}\n`
+    : "";
   return `You turn a UC San Diego student's chat message into JSON for a campus navigation app. It is ${today}, ${time}.
-Only copy what the message says; never invent rooms, buildings or times. Leave out fields the message doesn't mention.
+Only copy what the message says; never invent rooms, buildings or times. Leave out fields the message doesn't mention.${known}
 - action "class": they're going to a class. course = the course code as written ("math 20c" -> "MATH 20C"). meeting = lecture/discussion/lab/midterm/final if said.
 - action "route": they want to go somewhere that isn't a class. place = where.
 - action "nearby": they want the closest restroom, water refill, coffee, food, vending machine, printer, study spot, computer lab, parking, EV charger, bike rack, Spin hub, ATM, mailbox, laundry, lactation room, AED or clinic. what = one word for it. place = "near X" if said.
@@ -78,6 +87,7 @@ Only copy what the message says; never invent rooms, buildings or times. Leave o
 - inMinutes: "in 30 minutes" -> 30, "in an hour" -> 60, "in half an hour" -> 30.
 - at: a clock time in 24h "HH:MM"; "at 3" or "at 3pm" -> "15:00", "at noon" -> "12:00".
 - day: "today", "tomorrow" or a weekday name, if said.
+- remember: short lasting facts from THIS message only ("Usually bikes", "Usually starts at Sixth College", "Needs a step-free route", "Takes CSE 11"). Leave it out for a one-off trip, a time, or a question. If the fact is how they travel, also set mode. If it is where they usually start, also set from.
 Examples:
 "I have math 20C today in 30 minutes" -> {"action":"class","course":"MATH 20C","day":"today","inMinutes":30}
 "cse 12 discussion at 4, biking from the price center" -> {"action":"class","course":"CSE 12","meeting":"discussion","at":"16:00","mode":"bike","from":"Price Center"}
@@ -87,7 +97,9 @@ Examples:
 "when's the next bus at Gilman" -> {"action":"stop","place":"Gilman"}
 "where's my next class" -> {"action":"next"}
 "actually I'll take the bus" -> {"action":"change","mode":"bus"}
-"I'm at the Warren Lecture Hall" -> {"action":"change","from":"Warren Lecture Hall"}`;
+"I'm at the Warren Lecture Hall" -> {"action":"change","from":"Warren Lecture Hall"}
+"I usually bike and I live at Sixth College" -> {"action":"other","mode":"bike","from":"Sixth College","remember":["Usually bikes","Usually starts at Sixth College"],"reply":"I'll bike from Sixth College unless you say otherwise."}
+"I use a wheelchair" -> {"action":"other","mode":"accessible","remember":["Needs a step-free route"],"reply":"I'll keep your routes step-free."}`;
 }
 
 /** Make whatever came back safe to use: drop unknown fields and bad values. */
@@ -109,6 +121,14 @@ export function cleanIntent(raw: unknown): Intent | null {
   }
   if (typeof r.mode === "string" && (TRAVEL_MODES as string[]).includes(r.mode)) intent.mode = r.mode as TravelMode;
   if (typeof r.inMinutes === "number" && r.inMinutes >= 0 && r.inMinutes < 24 * 60) intent.inMinutes = Math.round(r.inMinutes);
+  if (Array.isArray(r.remember)) {
+    const facts = r.remember
+      .filter((f): f is string => typeof f === "string")
+      .map((f) => f.replace(/\s+/g, " ").trim())
+      .filter((f) => f.length > 2 && f.length <= 140)
+      .slice(0, 3);
+    if (facts.length) intent.remember = facts;
+  }
   const at = text(r.at)?.match(/^([0-2]?\d):([0-5]\d)$/);
   if (at && Number(at[1]) < 24) intent.at = `${at[1].padStart(2, "0")}:${at[2]}`;
   return intent;
@@ -168,7 +188,7 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
 
   // Where they are: "from X", "I'm at X", "I'm in X". Stops at the next part of the sentence.
   const stopWords = String.raw`(?=,|\.|\?|!| to | by | at \d| at noon| in \d| in an?\b| in half| on | and | using | via |$)`;
-  const from = text.match(new RegExp(String.raw`\b(?:from|i'm at|i am at|i'm in|i am in|i'm near|currently at|leaving)\s+(?:the\s+)?(.+?)${stopWords}`));
+  const from = text.match(new RegExp(String.raw`\b(?:from|i'm at|i am at|i'm in|i am in|i'm near|currently at|leaving|i live at|i live in|my dorm is at|my dorm is)\s+(?:the\s+)?(.+?)${stopWords}`));
   if (from && !/^(here|home|my place)$/.test(from[1])) intent.from = from[1];
 
   // Lecture, lab… but not from a place's name ("I'm at Warren Lecture Hall").
@@ -201,5 +221,10 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
     intent.action = "route";
     intent.place = to[1];
   } else if (intent.mode || intent.from || intent.inMinutes !== undefined || intent.at) intent.action = "change";
+  // A lasting detail, not a one-off trip: "I usually bike", "I live at Sixth", "I use a wheelchair".
+  if (/\b(i usually|i always|i prefer|from now on|remember that|i live|my dorm|i use a wheelchair|i can't (?:do|take) stairs)\b/.test(text)) {
+    intent.remember = [message.trim().replace(/\s+/g, " ").slice(0, 140)];
+    if (intent.action === "other") intent.reply = "I'll remember that.";
+  }
   return intent;
 }

@@ -23,9 +23,8 @@ type Brain =
 
 /**
  * Reads chat messages into an Intent.
- * Gemma when there is one on this computer: Chrome's built-in model, else Ollama
- * (through the dev server's /ollama proxy). Otherwise, and whenever Gemma fails,
- * the pattern parser, so the chat always answers.
+ * The Gemma installed on this computer (Ollama), else Chrome's built-in model.
+ * Whenever Gemma fails, the pattern parser answers, so the chat still works.
  */
 export class Gemma {
   private brain: Brain = { kind: "patterns" };
@@ -35,10 +34,16 @@ export class Gemma {
     private readonly onStatus: (message: string) => void,
   ) {}
 
-  /** Find a Gemma. Resolves quickly; never throws. */
+  /** Find the Gemma installed on this computer (Ollama), else Chrome's built-in one. Never throws. */
   async connect(): Promise<void> {
     if (settings.gemma === "off" || new URLSearchParams(location.search).get("gemma") === "off") {
       this.onStatus("Gemma is off (settings.gemma). Using simple patterns.");
+      return;
+    }
+    const installed = await this.installedModel();
+    if (installed) {
+      this.brain = { kind: "ollama", model: installed };
+      this.onStatus(`Gemma (${installed}, installed through Ollama) is ready.`);
       return;
     }
     const chrome = globalThis.LanguageModel;
@@ -51,23 +56,26 @@ export class Gemma {
           return;
         }
       } catch {
-        // Fall through to Ollama.
+        // No built-in model either.
       }
     }
-    try {
-      const res = await fetch("/ollama/api/tags", { signal: AbortSignal.timeout(1500) });
-      const { models } = (await res.json()) as { models: { name: string }[] };
-      const names = models.map((m) => m.name);
-      const model = names.find((n) => n === settings.ollamaModel) ?? names.find((n) => n.startsWith("gemma"));
-      if (model) {
-        this.brain = { kind: "ollama", model };
-        this.onStatus(`Gemma (${model}, through Ollama) is ready.`);
-        return;
+    this.onStatus(`No installed Gemma. Run "ollama pull ${settings.ollamaModel}". Using simple patterns for now.`);
+  }
+
+  /** A Gemma model Ollama already has. Ollama can be slow to wake, so this waits and tries twice. */
+  private async installedModel(): Promise<string | null> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch("/ollama/api/tags", { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) return null;
+        const { models } = (await res.json()) as { models?: { name: string }[] };
+        const names = (models ?? []).map((m) => m.name);
+        return names.find((n) => n === settings.ollamaModel) ?? names.find((n) => n.startsWith("gemma")) ?? null;
+      } catch {
+        // Cold start: one more try.
       }
-      this.onStatus(`Ollama has no Gemma model. Run "ollama pull ${settings.ollamaModel}". Using simple patterns for now.`);
-    } catch {
-      this.onStatus("No Gemma found (Chrome's built-in model or Ollama). Using simple patterns for now.");
     }
+    return null;
   }
 
   get name(): string {
@@ -76,14 +84,19 @@ export class Gemma {
     return "patterns";
   }
 
-  /** `previous`: the request being changed, so "by bike instead" makes sense. */
-  async read(message: string, previous: Intent | null): Promise<Intent> {
+  /** `previous`: the request being changed, so "by bike instead" makes sense. `facts`: details already remembered. */
+  async read(message: string, previous: Intent | null, facts: string[] = []): Promise<Intent> {
     const fallback = parseLocally(message, this.isCourse);
     const input = previous ? `Previous request: ${JSON.stringify(previous)}\nNew message: ${message}` : message;
     try {
-      const answer = await this.ask(input);
+      const answer = await this.ask(input, facts);
       const intent = answer === null ? null : cleanIntent(JSON.parse(answer));
       if (!intent) return fallback;
+      // A lasting detail the patterns caught ("I usually bike") even if Gemma left remember empty.
+      if (!intent.remember?.length && fallback.remember) intent.remember = fallback.remember;
+      // A lasting detail's mode and start, when Gemma answered the trip but skipped them.
+      if (!intent.from && fallback.from) intent.from = fallback.from;
+      if (fallback.remember && !intent.mode && fallback.mode) intent.mode = fallback.mode;
       // Gemma reads sentences better; the patterns know which course codes exist.
       if (intent.course && !this.isCourse(intent.course)) intent.course = fallback.course;
       if (!intent.course && fallback.course && intent.action !== "route") {
@@ -98,7 +111,7 @@ export class Gemma {
   }
 
   /** Gemma's raw JSON answer, or null when there's no Gemma to ask. */
-  private async ask(input: string): Promise<string | null> {
+  private async ask(input: string, facts: string[]): Promise<string | null> {
     const now = new Date();
     if (this.brain.kind === "chrome") {
       if (!this.brain.ready) {
@@ -106,7 +119,7 @@ export class Gemma {
         return null;
       }
       // A fresh session each time: the date and time in the instructions stay current.
-      const session = await this.brain.model.create({ ...LANGUAGES, initialPrompts: [{ role: "system", content: systemPrompt(now) }] });
+      const session = await this.brain.model.create({ ...LANGUAGES, initialPrompts: [{ role: "system", content: systemPrompt(now, facts) }] });
       try {
         return await session.prompt(input, { responseConstraint: INTENT_SCHEMA });
       } finally {
@@ -123,7 +136,7 @@ export class Gemma {
           format: INTENT_SCHEMA,
           options: { temperature: 0 },
           messages: [
-            { role: "system", content: systemPrompt(now) },
+            { role: "system", content: systemPrompt(now, facts) },
             { role: "user", content: input },
           ],
         }),

@@ -18,6 +18,7 @@ import { ClassFinder, clock, dayFor, describe, type ClassOption } from "./classe
 import type { Gemma } from "./Gemma.ts";
 import type { Intent, TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
+import { loadMemory, noteFact, saveMemory, type Memory } from "./memory.ts";
 import { nearbyKind, nearest } from "./nearby.ts";
 import { groupOf, nearestStop, stopNamed, stopSummary } from "./stops.ts";
 
@@ -29,8 +30,13 @@ export interface Reply {
 }
 
 /** What the assistant shows on the map. */
+export interface PlannedTrip {
+  from: Endpoint;
+  to: Endpoint;
+  mode: TravelMode;
+}
 export interface MapView {
-  trip(route: Route | null): void;
+  trip(route: Route | null, placed?: PlannedTrip): void;
   /** Labelled dots: the nearest restrooms, say. */
   markers(points: { lngLat: LngLat; label: string }[]): void;
   /** A stop's lines, and the map moved to it. */
@@ -55,7 +61,6 @@ interface Trip {
 
 /** Starting points offered when the app doesn't know where you are. */
 const START_PICKS = ["Geisel Library", "Price Center", "Warren Lecture Hall", "RIMAC"];
-const TRAVEL_CHOICES: TravelMode[] = ["walk", "bike", "bus", "accessible"];
 const SAVED_SECTIONS_KEY = "chat.sections";
 
 /**
@@ -69,8 +74,11 @@ export class Assistant {
   /** The last start named, for when there's no location: better than asking every time. */
   private lastStart: Place | null = null;
   private mode: TravelMode = "walk";
+  /** Set only when this request names a way to travel. Otherwise the fastest way is used. */
+  private explicit: TravelMode | null = null;
   private trip: Trip | null = null;
   private last: Intent | null = null;
+  private readonly memory: Memory;
   /** The last reply asked "where are you?": this runs once it's answered. */
   private pending: ((at: Place) => Promise<Reply>) | null = null;
 
@@ -83,29 +91,41 @@ export class Assistant {
     private readonly view: MapView,
   ) {
     this.classes = new ClassFinder(campus);
+    this.memory = loadMemory();
+    if (this.memory.mode) this.mode = this.memory.mode;
+  }
+
+  /** A sentence for the greeting, when something from an earlier chat is still kept. */
+  known(): string {
+    if (!this.memory.facts.length) return "";
+    return ` I remember: ${this.memory.facts.join("; ")}.`;
   }
 
   async handle(message: string): Promise<Reply> {
-    const intent = await this.gemma.read(message, this.last);
+    const intent = await this.gemma.read(message, this.last, this.memory.facts);
     console.info("[chat]", this.gemma.name, intent);
     this.last = intent;
-    if (intent.mode && intent.action !== "stop") this.mode = intent.mode;
+    const noted = this.keep(intent);
+    if (intent.mode && intent.action !== "stop") this.explicit = intent.mode;
+    else if (intent.action === "class" || intent.action === "route" || intent.action === "nearby" || intent.action === "next") this.explicit = null;
+    const finish = (reply: Reply): Reply =>
+      noted.length ? { ...reply, text: `${reply.text}\nI'll remember: ${noted.join("; ")}.` } : reply;
 
     // An answer to "where are you?", unless it's a whole new request.
     const pending = this.pending;
     if (pending && !["class", "route", "nearby", "stop", "next"].includes(intent.action)) {
       const place = this.find(intent.from ?? intent.place ?? message);
-      if (!place) return this.askWhere(`I couldn't find "${intent.from ?? intent.place ?? message}". Where are you?`, pending);
+      if (!place) return finish(this.askWhere(`I couldn't find "${intent.from ?? intent.place ?? message}". Where are you?`, pending));
       this.startAt(place);
       this.pending = null;
-      return pending(place);
+      return Promise.resolve(pending(place)).then(finish);
     }
     this.pending = null;
 
     if (intent.from && /^(here|me|my location|where i am)$/i.test(intent.from)) this.from = null;
     else if (intent.from) {
       const place = this.find(intent.from);
-      if (!place) return this.askWhere(`I couldn't find "${intent.from}". Where are you?`, () => this.go());
+      if (!place) return finish(this.askWhere(`I couldn't find "${intent.from}". Where are you?`, () => this.go()));
       this.startAt(place);
     } else if (intent.action !== "change") {
       // A new request starts from where you are again.
@@ -114,28 +134,41 @@ export class Assistant {
 
     switch (intent.action) {
       case "class":
-        return this.toClass(intent);
+        return Promise.resolve(this.toClass(intent)).then(finish);
       case "next":
-        return this.nextClass();
+        return Promise.resolve(this.nextClass()).then(finish);
       case "route":
-        if (intent.place) return this.toPlace(intent.place, this.target(intent));
+        if (intent.place) return Promise.resolve(this.toPlace(intent.place, this.target(intent))).then(finish);
         break;
       case "nearby":
-        return this.nearby(intent.what ?? message, intent.place);
+        return this.nearby(intent.what ?? message, intent.place).then(finish);
       case "stop":
-        return this.stopTimes(intent.place);
+        return this.stopTimes(intent.place).then(finish);
       case "change":
         if (this.trip) {
           const target = this.target(intent);
           if (target) this.trip = { ...this.trip, arriveBy: target };
-          return this.go();
+          return this.go().then(finish);
         }
     }
-    return {
+    return finish({
       text:
         intent.reply ??
-        `Tell me where you need to be, like "I have MATH 20C in 30 minutes", "nearest restroom" or "next bus at Gilman". Add "by bike", "by bus" or "from Price Center" any time.`,
-    };
+        (noted.length
+          ? "Got it. I'll use that the next time you ask for directions."
+          : `Tell me where you need to be, like "I have MATH 20C in 30 minutes", "nearest restroom" or "next bus at Gilman". Add "by bike", "by bus" or "from Price Center" any time.`),
+    });
+  }
+
+  /** Save lasting facts from this message. One-off trips (no `remember`) change nothing. */
+  private keep(intent: Intent): string[] {
+    const facts = intent.remember ?? [];
+    if (!facts.length) return [];
+    for (const fact of facts) noteFact(this.memory, fact);
+    if (intent.mode) this.memory.mode = intent.mode;
+    if (intent.from && !/^(here|me|my location|where i am)$/i.test(intent.from)) this.memory.start = intent.from;
+    saveMemory(this.memory);
+    return facts;
   }
 
   /** The time a message gives: "in 30 minutes" or "at 3pm" (on its day). */
@@ -267,7 +300,7 @@ export class Assistant {
         {
           label: `Walk to ${stop.name}`,
           pick: () => {
-            this.mode = "walk";
+            this.explicit = "walk";
             this.trip = { to: { endpoint: { kind: "point", lngLat: stop.lngLat, label: stop.name }, label: stop.name }, arriveBy: null, title: stop.name };
             return this.go();
           },
@@ -282,22 +315,38 @@ export class Assistant {
     if (!trip) return { text: "Where do you want to go?" };
     const from = await this.start();
     if (!from) return this.askWhere(`${trip.title}. Where are you starting from?`, () => this.go());
-    const planned = this.planner.plan(from.endpoint, trip.to.endpoint, this.mode, trip.arriveBy ?? undefined);
-    if (!planned.ok) {
+    const options = this.planner.compare(from.endpoint, trip.to.endpoint, trip.arriveBy ?? undefined);
+    const wanted = this.explicit ? options.find((o) => o.mode === this.explicit) : undefined;
+    const picked = wanted ?? options[0];
+    if (!picked) {
       this.view.trip(null);
-      return { text: `${trip.title}. ${planned.error}` };
+      return { text: `${trip.title}. No route from ${from.label}.` };
     }
+    this.mode = picked.mode;
+    const planned = picked.planned;
     const route = planned.route;
-    this.view.trip(route);
-    const minutes = Math.ceil(planned.minutes);
-    const how = planned.walkInstead ? "Walking is as fast as transit here" : MODES[this.mode].label;
+    this.view.trip(route, { from: from.endpoint, to: trip.to.endpoint, mode: picked.mode });
+    const minutes = Math.max(1, Math.ceil(planned.minutes));
+    const fastest = options[0];
+    const others = options.filter((o) => o.mode !== picked.mode);
+    const how = MODES[picked.mode].label;
+    const asked = this.explicit && wanted ? "" : this.explicit && !wanted ? `${MODES[this.explicit].label} isn't possible here. ` : "";
+    const choice = !this.explicit || !wanted
+      ? `Fastest is ${how.toLowerCase()}`
+      : picked.mode === fastest.mode
+        ? `${how} is the fastest`
+        : `${how}, though ${MODES[fastest.mode].label.toLowerCase()} is faster (${Math.max(1, Math.ceil(fastest.planned.minutes))} min)`;
+    const also = others.map((o) => `${MODES[o.mode].label} ${Math.max(1, Math.ceil(o.planned.minutes))} min`).join(" · ");
+    const usual = this.memory.mode && this.memory.mode !== picked.mode ? options.find((o) => o.mode === this.memory.mode) : undefined;
     const lines = [
       `${trip.title}.`,
-      `${how} from ${from.label}: ${minutes} min, ${distance(route.meters)}. ${leaveAdvice(route, this.mode, minutes, trip.arriveBy)}`.trim(),
+      `${asked}${choice} from ${from.label}: ${minutes} min, ${distance(route.meters)}. ${leaveAdvice(route, picked.mode, minutes, trip.arriveBy)}`.trim(),
+      also ? `Also: ${also}.` : "",
+      usual && !this.explicit ? `You usually ${MODES[usual.mode].label.toLowerCase()} (${Math.max(1, Math.ceil(usual.planned.minutes))} min). Say so if you want that instead.` : "",
       ...this.transitLines(route),
       ...this.insideLines(trip.to.endpoint, route),
       ...(trip.notes ?? []),
-    ];
+    ].filter(Boolean);
     const leaving = from.endpoint.kind === "building" ? from.endpoint.building : undefined;
     const steps = buildSteps(this.campus.graph, route, trip.to.label, { leaving }).map(
       (s) => `${s.text}${s.distance >= 15 ? ` (${distance(s.distance)})` : ""}`,
@@ -305,10 +354,10 @@ export class Assistant {
     return {
       text: lines.join("\n"),
       steps,
-      choices: TRAVEL_CHOICES.filter((m) => m !== this.mode).map((m) => ({
-        label: MODES[m].label,
+      choices: others.map((o) => ({
+        label: `${MODES[o.mode].label} · ${Math.max(1, Math.ceil(o.planned.minutes))} min`,
         pick: () => {
-          this.mode = m;
+          this.explicit = o.mode;
           return this.go();
         },
       })),
@@ -369,7 +418,11 @@ export class Assistant {
     if (this.from) return this.from;
     const at = await this.location.get();
     if (at && this.location.onCampus(at)) return { endpoint: { kind: "point", lngLat: at, label: "Your location" }, label: "your location" };
-    return this.lastStart;
+    if (this.lastStart) return this.lastStart;
+    if (!this.memory.start) return null;
+    const usual = this.find(this.memory.start);
+    if (usual) this.lastStart = usual;
+    return usual;
   }
 
   private find(query: string): Place | null {

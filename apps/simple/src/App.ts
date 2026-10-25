@@ -57,7 +57,7 @@ export class App {
 
     const term = this.campus.sections?.term;
     this.say("bot", {
-      text: `Hi! Tell me where you need to be and I'll route you there.${term ? ` I know every ${term} class.` : ""}`,
+      text: `Hi! Tell me where you need to be. I'll check walking, biking, step-free, and the bus or trolley, and take whichever is fastest.${term ? ` I know every ${term} class.` : ""}${this.assistant.known()}`,
       choices: ["I have MATH 20C tomorrow at 11", "Nearest restroom", "Next bus at Gilman", "Take me to Geisel by bike"].map((example) => ({
         label: example,
         pick: () => this.assistant.handle(example),
