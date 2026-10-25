@@ -103,6 +103,12 @@ export class Gemma {
         intent.place = fallback.place ?? intent.place;
         intent.item = fallback.item ?? intent.item;
         intent.quantity = fallback.quantity ?? intent.quantity;
+        if (fallback.tender) {
+          intent.tender = fallback.tender;
+          intent.nearest = fallback.nearest || intent.nearest;
+          intent.item = undefined;
+          intent.place = undefined;
+        }
       }
       // Gemma reads sentences better; the patterns know which course codes exist.
       if (intent.course && !this.isCourse(intent.course)) intent.course = fallback.course;

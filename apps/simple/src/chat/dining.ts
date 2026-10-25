@@ -36,6 +36,75 @@ const NO_BOX = /soup|beverage|drink|coffee|tea|boba|matcha|soda|juice|water|pizz
 /** HDH says these are made to order, so they take longer than a fast station. */
 const MADE_TO_ORDER = /bistro|burger|hot dog|sandwich|quesadilla|omelet/i;
 
+/** HDH markets: Dining Dollars, Triton Cash, and EBT. Halls take both tenders but not EBT. */
+const HDH_MARKETS = ["sunshine market", "goody", "rogers", "seventh market", "sixth market", "audrey"];
+/** University Centers stalls. Their site says most eateries take Triton Cash, not Dining Dollars. */
+const TRITON_CASH_ONLY = [
+  "panda", "subway", "burger king", "taco bell", "starbucks", "curry up", "dirty birds", "flavorfull",
+  "santorini", "su pan", "sun dry", "tapioca", "zanzibar", "blue pepper", "croutons", "yogurt world", "food co-op", "the loft",
+];
+
+/**
+ * Dining Dollars (what students call Triton Dollars) vs Triton Cash, from the published HDH
+ * and University Centers pages. Not a guess about a stall that isn't on those lists.
+ */
+export function tenderFor(place: string): string | undefined {
+  const q = place.toLowerCase();
+  const market = HDH_MARKETS.find((name) => q.includes(name));
+  if (market) return `${titleCase(market)} is an HDH market: Dining Dollars (Triton Dollars), Triton Cash, and EBT / CalFresh.`;
+  const hall = HALLS.find((h) => [h.name, h.place, ...h.aliases].some((name) => q.includes(name.toLowerCase())));
+  if (hall) return `${hall.name} is HDH residential dining: Dining Dollars (Triton Dollars) and Triton Cash. Not EBT.`;
+  if (TRITON_CASH_ONLY.some((name) => q.includes(name)) || /price center|student center/.test(q)) {
+    return `That's a University Centers eatery. Most of those take Triton Cash and Grubhub, not Dining Dollars. Sunshine Market, in Price Center, is the HDH exception: Dining Dollars and EBT.`;
+  }
+  return undefined;
+}
+
+function titleCase(name: string): string {
+  return name.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+/** Given to Gemma with every request, so "where can I use dining dollars?" is not a dish search. */
+export const PAYMENT_GUIDE = `Payment facts you already know. Use only these. Do not invent shops.
+- Dining Dollars, also called Triton Dollars: HDH dining halls (64 Degrees, Pines, OceanView, Ventanas, The Bistro, Foodworx, Restaurants at Sixth, Club Med) and HDH markets (Sunshine, Goody's, Rogers, Seventh, Sixth, Audrey's). Not at most Price Center chains.
+- Triton Cash: those same HDH halls and markets, plus most University Centers eateries (Panda Express, Subway, Taco Bell, Burger King, Starbucks, and the other stalls in Price Center and the Student Center).
+- EBT / CalFresh: HDH markets only (Sunshine, Goody's, Rogers, Seventh, Sixth, Audrey's).
+If they ask which places take one of these, action is "order", tender is "dollars", "cash", or "ebt", and place and item are left empty.
+If they want the nearest one ("find me a place nearest me with dining dollars", "closest spot that takes triton cash"), also set nearest true. Never put that sentence in item.`;
+
+/** Campus-search queries for places that take each tender, so "nearest" can be measured. */
+export function tenderPlaces(tender: "dollars" | "cash" | "ebt"): { query: string; label: string }[] {
+  const halls = HALLS.map((hall) => ({ query: hall.place, label: hall.name }));
+  const markets = [
+    { query: "Sunshine Market", label: "Sunshine Market" },
+    { query: "Goody's Marketplace", label: "Goody's" },
+    { query: "Rogers Market", label: "Rogers Market" },
+    { query: "Seventh Market", label: "Seventh Market" },
+    { query: "Sixth Market", label: "Sixth Market" },
+    { query: "Audrey's Cafe", label: "Audrey's" },
+  ];
+  const centers = [
+    { query: "Panda Express", label: "Panda Express" },
+    { query: "Subway", label: "Subway" },
+    { query: "Taco Bell", label: "Taco Bell" },
+    { query: "Burger King", label: "Burger King" },
+    { query: "Starbucks", label: "Starbucks" },
+  ];
+  if (tender === "ebt") return markets;
+  if (tender === "cash") return [...halls, ...markets, ...centers];
+  return [...halls, ...markets];
+}
+
+export function placesFor(tender: "dollars" | "cash" | "ebt"): string {
+  if (tender === "dollars") {
+    return "Dining Dollars (Triton Dollars) work at the HDH dining halls: 64 Degrees, Pines, OceanView, Ventanas, The Bistro, Foodworx, Restaurants at Sixth, and Club Med. They also work at the HDH markets: Sunshine, Goody's, Rogers, Seventh, Sixth, and Audrey's. Most Price Center chains (Panda Express, Subway, Taco Bell, Burger King, Starbucks, and the other University Centers stalls) do not take them. Those take Triton Cash.";
+  }
+  if (tender === "cash") {
+    return "Triton Cash works at the HDH dining halls and HDH markets, and at most University Centers eateries in Price Center and the Student Center (Panda Express, Subway, Taco Bell, Burger King, Starbucks, and the other stalls).";
+  }
+  return "EBT / CalFresh is for HDH markets only: Sunshine, Goody's, Rogers, Seventh, Sixth, and Audrey's. The dining halls do not take it.";
+}
+
 export const HALLS: DiningHall[] = [
   { name: "64 Degrees", place: "64 Degrees", locId: "2", locDetId: "37", aliases: ["64", "revelle", "sixty four"] },
   { name: "Pines", place: "Pines", locId: "3", locDetId: "6", aliases: ["muir", "pines"] },
@@ -155,6 +224,77 @@ export function explainStatus(text: string): string | undefined {
   return undefined;
 }
 
+export interface FoodHit {
+  name: string;
+  hall: string;
+  locId: string;
+  locDetId: string;
+  /** "Pines / Breeze" */
+  where: string;
+  /** "9:00 AM - 11:00 PM" or "Closed" */
+  hours: string;
+}
+
+/** Hits from HDH's public menu search (every hall, not a signed-in Triton2Go queue). */
+export function parseSearch(html: string): FoodHit[] {
+  const hits: FoodHit[] = [];
+  const row = /<h4>([^<]+)<\/h4>[\s\S]*?<a href="[^"]*Venue_V3\?locId=(\d+)&locDetID=(\d+)">([^<]+)<\/a>\s*<br\s*\/?>\s*([^<]*?)\s*<br\s*\/?>\s*Today,\s*([^<]+)/gi;
+  for (const match of html.matchAll(row)) {
+    const name = match[1].replace(/\s+/g, " ").trim();
+    if (!name || name.startsWith('"')) continue;
+    hits.push({
+      name,
+      locId: match[2],
+      locDetId: match[3],
+      hall: match[4].trim(),
+      where: match[5].replace(/\s*\/\s*$/, "").replace(/\s+/g, " ").trim(),
+      hours: match[6].replace(/\s+/g, " ").trim(),
+    });
+  }
+  return hits;
+}
+
+const searchCache = new Map<string, Promise<FoodHit[]>>();
+
+/** Every hall currently listing this food, from HDH's menu search. */
+/** A hall from a search hit, using the known list when we have one. */
+export function hallFromHit(hit: FoodHit): DiningHall {
+  return hallNamed(hit.hall) ?? { name: hit.hall, place: hit.hall, locId: hit.locId, locDetId: hit.locDetId, aliases: [] };
+}
+
+export function searchMenus(query: string): Promise<FoodHit[]> {
+  const q = stem(query).trim();
+  if (!q) return Promise.resolve([]);
+  const hit = searchCache.get(q);
+  if (hit) return hit;
+  const pending = fetch(`/hdh/dining/apps/diningservices/Restaurants/SearchResults?searchText=${encodeURIComponent(q)}`)
+    .then((res) => {
+      if (!res.ok) throw new Error(`HDH search HTTP ${res.status}`);
+      return res.text();
+    })
+    .then(parseSearch);
+  searchCache.set(q, pending);
+  pending.catch(() => searchCache.delete(q));
+  return pending;
+}
+
+/** "open until 11:00 PM" or "closed right now", from the hours HDH prints. */
+export function openStatus(hours: string, now = new Date()): string {
+  if (/closed/i.test(hours)) return `closed right now`;
+  const match = hours.match(/(\d{1,2}):(\d{2})\s*(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (!match) return hours;
+  const mins = (h: string, m: string, ap: string) => {
+    let hour = Number(h) % 12;
+    if (ap.toUpperCase() === "PM") hour += 12;
+    return hour * 60 + Number(m);
+  };
+  const start = mins(match[1], match[2], match[3]);
+  const end = mins(match[4], match[5], match[6]);
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const open = end < start ? cur >= start || cur < end : cur >= start && cur < end;
+  return open ? `open until ${match[4]}:${match[5]} ${match[6].toUpperCase()}` : `closed right now (hours ${hours})`;
+}
+
 export function quote(menu: Menu, item: MenuItem, quantity: number, now = new Date()): string {
   const qty = Math.max(1, Math.min(20, Math.round(quantity)));
   const boxes = boxesFor(item.name, qty);
@@ -177,7 +317,7 @@ export function quote(menu: Menu, item: MenuItem, quantity: number, now = new Da
   }
   if (total !== undefined) lines.push(`About ${money(total)} at checkout${deposit ? `, including the deposit` : ""}.`);
   lines.push(
-    `${menu.hall.name} is listed as ${menu.hours}. A rough pickup is about ${prep} min once the kitchen has the ticket${MADE_TO_ORDER.test(item.name) || MADE_TO_ORDER.test(menu.hall.name) ? " (it's made to order)" : ""}. Off-peak, HDH says 7–9am and 2–5pm are faster.`,
+    `${menu.hall.name} is ${openStatus(menu.hours, now)}. A rough pickup is about ${prep} min once the kitchen has the ticket${MADE_TO_ORDER.test(item.name) || MADE_TO_ORDER.test(menu.hall.name) ? " (it's made to order)" : ""}. HDH does not publish the live Triton2Go queue without a login; off-peak (7–9am and 2–5pm) is when they say the line is shorter.`,
   );
   lines.push(`On the Triton2Go app, only "Pick up" or "Ready now" means it's actually ready.`);
   return lines.join(" ");

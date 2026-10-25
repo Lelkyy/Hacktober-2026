@@ -1,5 +1,5 @@
 import type { ModeId } from "@campus/core";
-import { hallNamed } from "./dining.ts";
+import { hallNamed, PAYMENT_GUIDE } from "./dining.ts";
 import { nearbyKind } from "./nearby.ts";
 
 /**
@@ -33,6 +33,10 @@ export interface Intent {
   item?: string;
   /** How many of that dish. */
   quantity?: number;
+  /** "which places take dining dollars?" dollars, cash, or ebt. No dish. */
+  tender?: "dollars" | "cash" | "ebt";
+  /** The closest place that takes `tender`, not the whole list. */
+  nearest?: boolean;
   /** "in 30 minutes" -> 30. */
   inMinutes?: number;
   /** "at 3pm" -> "15:00" (24h). */
@@ -59,6 +63,8 @@ export const INTENT_SCHEMA = {
     action: { type: "string", enum: ["class", "route", "nearby", "stop", "next", "change", "order", "other"] },
     item: { type: "string" },
     quantity: { type: "number" },
+    tender: { type: "string", enum: ["dollars", "cash", "ebt"] },
+    nearest: { type: "boolean" },
     course: { type: "string" },
     meeting: { type: "string", enum: ["lecture", "discussion", "lab", "midterm", "final"] },
     place: { type: "string" },
@@ -83,6 +89,7 @@ export function systemPrompt(now: Date, facts: string[] = []): string {
     : "";
   return `You turn a UC San Diego student's chat message into JSON for a campus navigation app. It is ${today}, ${time}.
 Only copy what the message says; never invent rooms, buildings or times. Leave out fields the message doesn't mention.${known}
+${PAYMENT_GUIDE}
 - action "class": they're going to a class. course = the course code as written ("math 20c" -> "MATH 20C"). meeting = lecture/discussion/lab/midterm/final if said.
 - action "route": they want to go somewhere that isn't a class. place = where.
 - action "nearby": they want the closest restroom, water refill, coffee, food, vending machine, printer, study spot, computer lab, parking, EV charger, bike rack, Spin hub, ATM, mailbox, laundry, lactation room, AED or clinic. what = one word for it. place = "near X" if said.
@@ -109,7 +116,10 @@ Examples:
 "I'm at the Warren Lecture Hall" -> {"action":"change","from":"Warren Lecture Hall"}
 "I usually bike and I live at Sixth College" -> {"action":"other","mode":"bike","from":"Sixth College","remember":["Usually bikes","Usually starts at Sixth College"],"reply":"I'll bike from Sixth College unless you say otherwise."}
 "I use a wheelchair" -> {"action":"other","mode":"accessible","remember":["Needs a step-free route"],"reply":"I'll keep your routes step-free."}
-"two matcha boba at Pines, how much and how long" -> {"action":"order","place":"Pines","item":"matcha boba","quantity":2}`;
+"two matcha boba at Pines, how much and how long" -> {"action":"order","place":"Pines","item":"matcha boba","quantity":2}
+"places that take dining dollars" -> {"action":"order","tender":"dollars"}
+"where can I use triton cash" -> {"action":"order","tender":"cash"}
+"find me the place nearest me with dining dollars" -> {"action":"order","tender":"dollars","nearest":true}`;
 }
 
 /** Make whatever came back safe to use: drop unknown fields and bad values. */
@@ -123,6 +133,8 @@ export function cleanIntent(raw: unknown): Intent | null {
   intent.course = text(r.course);
   intent.item = text(r.item);
   if (typeof r.quantity === "number" && r.quantity >= 1 && r.quantity <= 20) intent.quantity = Math.round(r.quantity);
+  if (r.tender === "dollars" || r.tender === "cash" || r.tender === "ebt") intent.tender = r.tender;
+  if (r.nearest === true) intent.nearest = true;
   intent.place = text(r.place);
   intent.what = text(r.what)?.toLowerCase();
   intent.from = text(r.from);
@@ -156,7 +168,7 @@ const NUMBER_WORDS: Record<string, number> = {
  * `isCourse` says whether a code like "MATH 20C" is a real course, so "in 30" never is one.
  */
 export function parseLocally(message: string, isCourse: (code: string) => boolean): Intent {
-  const text = message.toLowerCase().replace(/[’']/g, "'").replace(/\s+/g, " ").trim();
+  const text = message.toLowerCase().replace(/[’']/g, "'").replace(/\bw\//g, "with").replace(/\s+/g, " ").trim();
   const intent: Intent = { action: "other" };
 
   for (const m of text.matchAll(/\b([a-z]{2,5})\s?-?(\d{1,3}[a-z]{0,2})\b/g)) {
@@ -217,10 +229,22 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
 
   const near = text.match(new RegExp(String.raw`\b(?:near|by|around|close to|next to)\s+(?:the\s+)?(.+?)${stopWords}`));
   const kind = /\b(nearest|closest|nearby|near|where can i|where's a|where is a|i need (?!to\b)|find (?:a|me)|any)\b/.test(text) ? nearbyKind(text) : undefined;
-  const ordering = /\b(how much|price|cost|costs|order|menu|triton2\s?go|waiting for release|ready now|working on it)\b/.test(text)
+  const dollars = /\b(dining dollars?|triton dollars?)\b/.test(text);
+  const cash = /\btriton cash\b/.test(text);
+  const ebt = /\b(ebt|calfresh)\b/.test(text);
+  const askingPlaces = /\b(places?|spots?|somewhere|where|which|who|list|accept|takes?|using|use|nearest|closest|find)\b/.test(text);
+  const wantsNearest = /\b(nearest|closest|near me|around me)\b/.test(text) || (/\bfind\b/.test(text) && /\b(places?|spots?|somewhere)\b/.test(text));
+  if (!intent.course && (dollars || cash || ebt) && askingPlaces && !hallNamed(text)) {
+    intent.action = "order";
+    intent.tender = dollars ? "dollars" : cash ? "cash" : "ebt";
+    if (wantsNearest) intent.nearest = true;
+  }
+  const ordering = /\b(how much|price|cost|costs|order|menu|triton2\s?go|waiting for release|ready now|working on it|dining dollars?|triton dollars?|triton cash)\b/.test(text)
     || (!!hallNamed(text) && /\b(how long|wait)\b/.test(text));
   if (intent.course) intent.action = "class";
-  else if (ordering) {
+  else if (intent.tender) {
+    // Which places take this tender: not a dish, and not a hall name pulled out of the sentence.
+  } else if (ordering) {
     intent.action = "order";
     const hall = hallNamed(intent.place ?? text) ?? hallNamed(text);
     if (hall) intent.place = hall.name;

@@ -2,6 +2,7 @@ import {
   buildSteps,
   endpointPosition,
   floorPhrase,
+  haversine,
   insideHints,
   MODES,
   type Building,
@@ -18,7 +19,7 @@ import { ClassFinder, clock, dayFor, describe, type ClassOption } from "./classe
 import type { Gemma } from "./Gemma.ts";
 import type { Intent, TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
-import { explainStatus, findItems, hallNamed, loadMenu, money, prepMinutes, quote } from "./dining.ts";
+import { explainStatus, findItems, hallFromHit, hallNamed, loadMenu, money, openStatus, placesFor, prepMinutes, quote, searchMenus, tenderFor, tenderPlaces, type FoodHit } from "./dining.ts";
 import { loadMemory, noteFact, saveMemory, type Memory } from "./memory.ts";
 import { nearbyKind, nearest } from "./nearby.ts";
 import { groupOf, nearestStop, stopNamed, stopSummary } from "./stops.ts";
@@ -281,18 +282,63 @@ export class Assistant {
     return this.go();
   }
 
+  /** Closest campus place that takes this tender, then the route from where you are. */
+  private async nearestTender(tender: "dollars" | "cash" | "ebt"): Promise<Reply> {
+    const name = tender === "dollars" ? "Dining Dollars" : tender === "cash" ? "Triton Cash" : "EBT";
+    const here = await this.start();
+    if (!here) return this.askWhere(`Where are you? I'll find the nearest place that takes ${name}.`, () => this.nearestTender(tender));
+    const at = endpointPosition(here.endpoint);
+    const ranked = tenderPlaces(tender)
+      .flatMap((spot) => {
+        const hit = this.find(spot.query);
+        return hit ? [{ label: spot.label, hit, meters: haversine(at[0], at[1], endpointPosition(hit.endpoint)[0], endpointPosition(hit.endpoint)[1]) }] : [];
+      })
+      .sort((a, b) => a.meters - b.meters);
+    if (!ranked.length) return { text: placesFor(tender) };
+    const [best, ...rest] = ranked;
+    const others = rest.slice(0, 2).map((spot) => `${spot.label} (${distance(spot.meters)})`).join(", ");
+    this.trip = { to: best.hit, arriveBy: null, title: best.label };
+    const routed = await this.go();
+    return {
+      ...routed,
+      text: `Nearest place that takes ${name} is ${best.label}, about ${distance(best.meters)} from ${here.label}.${others ? ` Also nearby: ${others}.` : ""}\n${routed.text}`,
+    };
+  }
+
   /**
    * A Triton2Go question: today's HDH price times the quantity, the refundable box,
    * and what the app's wait words actually mean. Then the route to that hall.
    */
   private async orderFood(intent: Intent, message: string): Promise<Reply> {
     const status = explainStatus(message);
-    const hall = hallNamed(intent.place ?? "") ?? hallNamed(message);
+    if (intent.tender && intent.nearest && !intent.item) return this.nearestTender(intent.tender);
+    if (intent.tender && !intent.item) return { text: placesFor(intent.tender) };
+    const askingTender = /\b(dining dollars?|triton dollars?|triton cash)\b/i.test(message);
+    if (askingTender && !intent.item) {
+      const named = hallNamed(message)?.name ?? intent.place ?? message;
+      const tender = tenderFor(named) ?? tenderFor(message);
+      if (tender) {
+        const spot = this.find(hallNamed(message)?.place ?? named);
+        if (!spot) return { text: tender };
+        this.trip = { to: spot, arriveBy: null, title: spot.label };
+        const routed = await this.go();
+        return { ...routed, text: `${tender}\n${routed.text}` };
+      }
+    }
+    let hall = hallNamed(intent.place ?? "") ?? hallNamed(message);
+    const foundEverywhere = intent.item ? await searchMenus(intent.item).catch(() => [] as FoodHit[]) : [];
+    if (!hall && intent.item && foundEverywhere.length) {
+      const byHall = [...new Map(foundEverywhere.map((hit) => [hit.hall, hit])).values()];
+      const open = byHall.find((hit) => !openStatus(hit.hours).startsWith("closed")) ?? byHall[0];
+      hall = hallFromHit(open);
+    }
     if (!hall) {
       return {
         text:
           status ??
-          `Which dining hall? Pines, 64 Degrees, OceanView, Ventanas, the Bistro, Foodworx, Sixth, or Club Med. I can price a dish off today's menu and take you there.`,
+          (intent.item
+            ? `I couldn't find "${intent.item}" on today's HDH menus. Try Pines, 64 Degrees, OceanView, Ventanas, the Bistro, Foodworx, Sixth, or Club Med.`
+            : `Which dining hall? Pines, 64 Degrees, OceanView, Ventanas, the Bistro, Foodworx, Sixth, or Club Med. I can price a dish off today's menu and take you there.`),
       };
     }
     let menu;
@@ -303,18 +349,25 @@ export class Assistant {
         text: `${status ? `${status} ` : ""}I couldn't load the ${hall.name} menu just now. A Triton2Go box is a $5 refundable deposit unless the item is a drink, pizza, burrito, wrap, sandwich, or pastry. Only "Pick up" or "Ready now" means it's ready.`,
       };
     }
+    const elsewhere = [...new Map(foundEverywhere.filter((hit) => hit.hall !== hall.name).map((hit) => [hit.hall, hit])).values()];
     const matches = intent.item ? findItems(menu, intent.item) : [];
     const qty = intent.quantity ?? 1;
     let bill: string;
+    const also = elsewhere.length
+      ? `Also on today's menu at ${elsewhere
+          .slice(0, 3)
+          .map((hit) => `${hit.hall} (${openStatus(hit.hours)})`)
+          .join(", ")}.`
+      : "";
     if (matches.length > 1) {
       const lines = matches.slice(0, 6).map((item) => {
         const each = item.price;
         return each !== undefined ? `${qty} × ${item.name}: ${money(each)} each, ${money(each * qty)}` : item.name;
       });
       const prep = prepMinutes(matches[0].name, hall);
-      bill = `${qty} bobas at ${hall.name} (${menu.hours}):\n${lines.join("\n")}\nDrinks skip the $5 Triton2Go box. About ${prep} min once the kitchen has the ticket. Only "Pick up" or "Ready now" means it's ready.`;
+      bill = `${qty} at ${hall.name}, which is ${openStatus(menu.hours)}:\n${lines.join("\n")}\nDrinks skip the $5 Triton2Go box. About ${prep} min once the kitchen has the ticket. HDH doesn't publish the live Triton2Go line without a login. ${also}`;
     } else if (matches.length === 1) {
-      bill = quote(menu, matches[0], qty);
+      bill = `${quote(menu, matches[0], qty)}${also ? ` ${also}` : ""}`;
     } else {
       const sample = menu.items
         .filter((i) => i.price !== undefined)
@@ -324,6 +377,16 @@ export class Assistant {
       bill = `${hall.name} is ${menu.hours}.${sample ? ` A few prices: ${sample}.` : ""} ${status ?? `Name a dish and how many, like "2 boba at Pines".`}`;
     }
     if (status) bill = `${bill} ${status}`;
+    const onMap = [
+      ...new Set(
+        this.campus.search
+          .search(`${intent.item ?? ""} ${hall.name}`, { limit: 6 })
+          .flatMap((hit) => (hit.kind === "place" ? [hit.place.name] : [])),
+      ),
+    ].slice(0, 3);
+    if (onMap.length) bill = `${bill}\nOn the campus map: ${onMap.join(", ")}.`;
+    const tender = tenderFor(hall.name);
+    if (tender) bill = `${bill}\n${tender}`;
     const place = this.find(hall.place);
     if (!place) return { text: bill };
     this.trip = { to: place, arriveBy: null, title: hall.name };
