@@ -641,6 +641,11 @@ export function App() {
     }
     return null;
   }, [menus, to]);
+  // A dining hall's menu and prices need room: open the panel when one appears (from the chat as well as a pin).
+  const diningHall = dining?.hall.name;
+  useEffect(() => {
+    if (diningHall) setSheetOpen(true);
+  }, [diningHall]);
   const inside = useMemo(
     () =>
       data && destBuilding && route
