@@ -1,7 +1,7 @@
 import type { ModeId } from "@campus/core";
 import { budgetOf, dishOf, resolveHall } from "./menus.ts";
 import { nearbyKind } from "./nearby.ts";
-import { repair } from "./repair.ts";
+import { isGibberish, repair } from "./repair.ts";
 
 /**
  * What a chat message asks for, as the language model (or the fallback parser) reads it.
@@ -60,6 +60,10 @@ export interface Intent {
   reply?: string;
   /** The line after typo repair, when a real word changed. The reply can show it. */
   heard?: string;
+  /** They rejected the last answer ("not coffee", "something else"). Answer that request again, without this. */
+  again?: boolean;
+  /** The thing to leave out: "coffee", "geisel", a dish. */
+  avoid?: string;
   /**
    * Lasting facts from this message only ("Usually bikes", "Usually starts at Sixth").
    * Left out for a one-off trip.
@@ -222,8 +226,15 @@ export function needsModel(message: string, intent: Intent): boolean {
   return false;
 }
 
-/** "By bike instead" or "make it under $8" keeps the trip they were just planning. */
+/** "By bike instead" or "make it under $8" keeps the trip they were just planning. "Not coffee" drops that part and asks again. */
 export function carryOver(parsed: Intent, previous: Intent | null, message: string): Intent {
+  if (parsed.again) {
+    const trip = previous && ["order", "route", "class", "nearby", "stop", "next"].includes(previous.action);
+    if (!previous || !trip) {
+      return { action: "other", reply: "Tell me what to change. A place, food, or something nearby.", heard: parsed.heard };
+    }
+    return { ...previous, again: true, avoid: parsed.avoid, heard: parsed.heard ?? previous.heard, reply: undefined };
+  }
   if (!previous) return parsed;
   const tweak = parsed.action === "change" || /\b(instead|actually|rather|make it|make that|keep it)\b/i.test(message);
   const trip = previous.action === "order" || previous.action === "route" || previous.action === "class" || previous.action === "nearby";
@@ -546,7 +557,26 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
     if (intent.action === "other") intent.reply = "I'll remember that.";
   }
 
+  if ((intent.action === "route" || intent.action === "other") && intent.place?.startsWith("not ")) {
+    const rejected = rejectionOf(text);
+    if (rejected) {
+      intent.action = "change";
+      intent.again = true;
+      if (rejected.avoid) intent.avoid = rejected.avoid;
+      delete intent.place;
+      delete intent.reply;
+    }
+  }
+
   if (intent.action === "other" && !intent.reply) {
+    const rejected = rejectionOf(text);
+    if (rejected) {
+      intent.action = "change";
+      intent.again = true;
+      if (rejected.avoid) intent.avoid = rejected.avoid;
+    } else if (isGibberish(text)) {
+      intent.reply = "No way to understand that.";
+    } else {
     const talk = smallTalk(text) ?? answerTalk(text, new Date());
     if (talk) intent.reply = talk;
     else if (/\b(same place|same spot|there again|do that again|same trip)\b/.test(text)) intent.action = "change";
@@ -565,13 +595,61 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
       } else if (bare) {
         intent.action = "route";
         intent.place = bare;
-      } else if (text.split(/\s+/).filter(Boolean).length <= 14) intent.reply = answerTalk(text, new Date()) ?? heardYou(text);
+      } else if (isGibberish(text)) intent.reply = "No way to understand that.";
+      else if (text.split(/\s+/).filter(Boolean).length <= 14) intent.reply = answerTalk(text, new Date()) ?? heardYou(text);
       }
     }
+    }
+  }
+
+  if (intent.action === "other" && !intent.reply && isGibberish(text)) intent.reply = "No way to understand that.";
+
+  const rejected = rejectionOf(text);
+  const keptRoute = intent.action === "route" && !!intent.place && !intent.place.startsWith("not ") && intent.place !== rejected?.avoid;
+  if (rejected && !keptRoute && intent.action !== "drop" && intent.action !== "add" && intent.action !== "class" && intent.action !== "next") {
+    intent.action = "change";
+    intent.again = true;
+    if (rejected.avoid) intent.avoid = rejected.avoid;
+    delete intent.place;
+    delete intent.what;
+    delete intent.item;
+    delete intent.reply;
   }
 
   if (repaired.heard) intent.heard = repaired.heard;
   return intent;
+}
+
+/**
+ * A follow-up that throws out the last answer.
+ * "Not coffee", "anything but a burrito", "I want something else", "not that", "try again".
+ * A new destination in the same line ("nah, take me to rimac") is not one of these.
+ */
+function rejectionOf(text: string): { avoid?: string } | null {
+  const plain = text.replace(/[?.!,]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!plain || /^(?:sorry|oops|my bad|that is wrong|not what i meant)$/.test(plain)) return null;
+  if (/\b(?:want to go|take me|go to|get to|heading|headed)\b/.test(plain) && !/^(?:not|no|nah|nope|don't|dont)\b/.test(plain)) return null;
+
+  const swap =
+    /\b(?:something|anything|somewhere)\s+else\b|\b(?:something|anything)\s+different\b|\b(?:a )?different (?:one|place|spot|thing)\b|\banother (?:one|place|option|thing)\b|\bnot (?:that|this|it|those|the one)\b|\btry again\b|\bchange it\b|\brather not\b|\b(?:do not|don't|dont) want (?:that|this|it)\b|\bwhat else\b|\bnext one\b|\bnone of (?:that|those|these|them)\b|\b(?:give me|get me|show me|how about|can i (?:get|have))\s+(?:something|anything|another)\b/.test(
+      plain,
+    );
+  if (swap) {
+    const named = plain.match(/\b(?:not|without|except|but)\s+(?:the\s+|a\s+|an\s+)?([a-z][a-z ]{1,24})$/);
+    const avoid = named?.[1]?.replace(/\b(?:please|thanks|though)\b/g, "").trim();
+    if (!avoid || /^(?:that|this|it|one|those|these)$/.test(avoid)) return {};
+    return { avoid };
+  }
+
+  const lead = plain.match(
+    /^(?:please\s+)?(?:nah|nope|no more|no|not|anything but|other than|except|without|don't want|dont want|do not want|i don't want|i dont want)\s+(?:the\s+|a\s+|an\s+|any\s+|more\s+)?([a-z0-9][a-z0-9' -]{0,40})$/,
+  );
+  if (!lead) return null;
+  let thing = lead[1].replace(/\b(?:please|thanks|though|tho|anymore|actually|right now)\b/g, " ").replace(/\s+/g, " ").trim();
+  thing = thing.replace(/^(?:more|any)\s+/, "");
+  if (!thing || /^(?:that|this|it|one|those)$/.test(thing)) return {};
+  if (/^(?:taking|far|to|what i meant)\b/.test(thing)) return null;
+  return { avoid: thing };
 }
 
 /** Extra stops before the last place. `then` is sequential; `via` is a waypoint before the dest. */
