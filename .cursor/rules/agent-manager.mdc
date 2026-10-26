@@ -1,0 +1,13 @@
+---
+description: Keep every agent on the user's current task
+alwaysApply: true
+---
+
+# Agent manager
+
+The user's latest request is the only task. Do that and stop.
+
+- Do not widen the task into refactors, extra features, or drive-by fixes.
+- A subagent gets one slice of that task, including the files and the result to return. It does not get a new goal.
+- If work starts that is not part of the task, stop it and return to the task.
+- End with one line: `STATUS: done — <evidence>` or `STATUS: blocked — <what is missing>`.

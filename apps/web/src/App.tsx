@@ -13,7 +13,10 @@ import {
   type IndoorData,
   formatFare,
   routeLabel,
+  primaryTransit,
   transitOptions,
+  diningPin,
+  nameKey,
   tripFare,
   insideHints,
   endpointLabel,
@@ -78,7 +81,7 @@ import {
 import { InsideCard } from "./InsideCard.tsx";
 import { DiningMenu } from "./DiningMenu.tsx";
 import { FoodPanel } from "./FoodPanel.tsx";
-import { findDining, hallPinName, nameKey, type DiningMenus } from "./diningMenu.ts";
+import { findDining, type DiningMenus } from "@campus/chat";
 import { NavigationView } from "./NavigationView.tsx";
 import { TimingControl, type TimingState } from "./TimingControl.tsx";
 import { TransitPanel } from "./TransitPanel.tsx";
@@ -310,9 +313,14 @@ export function App() {
     [transitFor, from, to, arriveBy?.at, departAt],
   );
   // A new trip, time or setting starts from the top option.
-  useEffect(() => setSelectedOption(0), [transitResult]);
+  useEffect(() => {
+    const chosen = primaryTransit(transitResult?.options ?? []);
+    const index = chosen ? (transitResult?.options.indexOf(chosen) ?? 0) : 0;
+    setSelectedOption(index < 0 ? 0 : index);
+  }, [transitResult]);
   const transitOpts = transitResult?.options ?? [];
-  const bestTransit = transitOpts.find((o) => !o.walkOnly) ?? null;
+  const chosenTransit = primaryTransit(transitOpts);
+  const bestTransit = chosenTransit && !chosenTransit.walkOnly ? chosenTransit : null;
   const busUnavailable = transitResult && !bestTransit ? "No shuttle, bus or trolley route found for this trip." : null;
   const transitPlan: Plan | null = transitOpts[selectedOption]
     ? {
@@ -430,7 +438,14 @@ export function App() {
     accessible: { plan: stepFreePlan, unavailable: noStairsUnavailable },
     bike: { plan: bikePlan, unavailable: null },
     scooter: { plan: scooterPlan, unavailable: scooterUnavailable },
-    bus: { plan: bestTransit ? { ok: true, route: bestTransit.route, connectors: [] } : null, unavailable: busUnavailable },
+    bus: {
+      plan: !bestTransit
+        ? null
+        : mode === "bus" && transitPlan?.ok
+          ? transitPlan
+          : { ok: true, route: bestTransit.route, connectors: [] },
+      unavailable: busUnavailable,
+    },
   };
 
   const plan = useMemo(() => {
@@ -583,6 +598,8 @@ export function App() {
   campusPlacesRef.current = campusPlaces;
   const menusRef = useRef(menus);
   menusRef.current = menus;
+  const stepFreeRef = useRef(transitStepFree);
+  stepFreeRef.current = transitStepFree;
   const liveRef = useRef(live);
   liveRef.current = live;
   const chatCampus = useMemo<ChatCampus | null>(
@@ -602,6 +619,9 @@ export function App() {
             get menus() {
               return menusRef.current;
             },
+            get transitStepFree() {
+              return stepFreeRef.current;
+            },
           }
         : null,
     // Once per load: a new search object (saved places) needn't restart the conversation.
@@ -615,7 +635,6 @@ export function App() {
       setNavigating(false);
       setOpenStop(null);
       setTab("go");
-      setSelectedOption(0);
       setMode(trip.mode);
       setFromRaw(trip.from);
       setToRaw(trip.to);
@@ -793,7 +812,7 @@ export function App() {
 
   /** Directions to a dining hall from the Food tab. */
   const goToHall = (hallName: string) => {
-    const pin = nameKey(hallPinName(hallName));
+    const pin = nameKey(diningPin(hallName));
     const hallKey = nameKey(hallName);
     const place = allPlaces.find(
       (p) => nameKey(p.name) === pin || nameKey(p.name) === hallKey || p.aliases.some((a) => nameKey(a) === hallKey || nameKey(a) === pin),

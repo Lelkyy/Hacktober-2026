@@ -1,7 +1,9 @@
 import {
   batteryColor,
   clusterVehicles,
+  diningPin,
   haversine,
+  nameKey,
   type CampusGraph,
   type LiveVehicle,
   type LngLat,
@@ -28,7 +30,7 @@ import {
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PALETTE } from "./palette.ts";
-import { findDining, hallPinName, nameKey, type DiningMenus } from "./diningMenu.ts";
+import { findDining, type DiningMenus } from "@campus/chat";
 import { formatDistance, formatLead } from "./Itinerary.tsx";
 import type { LineBadge } from "./lineColor.ts";
 import { stopBadgeElement } from "./StopBadge.tsx";
@@ -710,7 +712,7 @@ export function MapView(props: MapViewProps) {
     // Every dining hall stays on the map, so each one can be tapped for its menu.
     if (props.menus) {
       const food = categories.findIndex((c) => c.id === "food");
-      const pins = new Set(props.menus.halls.map((h) => nameKey(hallPinName(h.name))));
+      const pins = new Set(props.menus.halls.map((h) => nameKey(diningPin(h.name))));
       const seen = new Set(shown.map((p) => `${p[0]},${p[1]},${p[3]}`));
       for (const p of points) {
         const key = `${p[0]},${p[1]},${p[3]}`;

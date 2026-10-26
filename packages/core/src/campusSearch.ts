@@ -188,7 +188,10 @@ export class CampusSearch {
     );
     // Not every word matched anything together: take the best partial matches.
     if (!results.length) results = this.buildings.search(q, { ...searchOptions(q), combineWith: "OR", boost });
-    const found = results.map((r) => this.byId.get(r.id)!).filter((b) => b !== exact);
+    const found = leadWith(
+      results.map((r) => this.byId.get(r.id)!).filter((b) => b !== exact),
+      q,
+    );
     return [...(exact ? [exact] : []), ...found].slice(0, limit);
   }
 
@@ -412,6 +415,29 @@ function merge<T extends { id: string; score: number }>(a: T[], b: T[]): T[] {
   const best = new Map<string, T>();
   for (const r of [...a, ...b]) if (!best.has(r.id) || best.get(r.id)!.score < r.score) best.set(r.id, r);
   return [...best.values()].sort((x, y) => y.score - x.score);
+}
+
+/**
+ * A one-word query like "muir" matches every residence hall that mentions the college.
+ * When the best hit is only housing, put the college itself first (Stewart Commons for Muir).
+ */
+function leadWith(buildings: Building[], q: string): Building[] {
+  const query = normalize(q);
+  if (!query || query.includes(" ") || buildings.length < 2) return buildings;
+  const phrases = (b: Building) =>
+    [b.name, ...b.aliases].map(normalize).filter((p) => p === query || p.startsWith(`${query} `));
+  const housing = /\b(residence|apartments?|laundry|pump|switching|substation)\b/;
+  const top = phrases(buildings[0]);
+  if (!top.length || top.some((p) => !housing.test(p))) return buildings;
+  const rank = (b: Building) => {
+    const good = phrases(b).filter((p) => !housing.test(p)).sort((a, c) => a.length - c.length);
+    const phrase = good[0];
+    if (!phrase) return Number.POSITIVE_INFINITY;
+    return (phrase === query ? 0 : 10) + (/\bcollege\b/.test(phrase) ? 0 : 5) + phrase.split(" ").length;
+  };
+  const best = [...buildings].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))[0];
+  if (!Number.isFinite(rank(best))) return buildings;
+  return [best, ...buildings.filter((b) => b !== best)];
 }
 
 /** A name with its spaces and punctuation taken out: "Price Center" -> "pricecenter". */

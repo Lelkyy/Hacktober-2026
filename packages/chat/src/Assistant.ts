@@ -4,6 +4,7 @@ import {
   type SectionMeeting,
   endpointPosition,
   floorPhrase,
+  diningPin,
   haversine,
   insideHints,
   MODES,
@@ -19,12 +20,11 @@ import type { TripPlanner } from "./TripPlanner.ts";
 import { ClassFinder, clock, dayFor, describe, type ClassOption, type SectionGroup } from "./classes.ts";
 import { forgetCourse, myClasses, rememberSection } from "./myClasses.ts";
 import type { ChatModel } from "./ChatModel.ts";
-import type { Intent, TravelMode } from "./intent.ts";
+import { parseLocally, replyTo, type Intent, type TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
-import { explainStatus, findItems, hallNamed, loadMenu, money, prepMinutes, quote } from "./dining.ts";
-import { placesFor, tenderPlaces, type Tender } from "./payment.ts";
-import { answerFood, factCard, formatQuestion, pickHall, usableReply, whereTo, type FoodAnswer } from "./agent.ts";
-import { budgetOf, dishOf, HALL_PLACE, pricePhrase, recommend, resolveHall, type FoodPick, type ScrapedMenus } from "./menus.ts";
+import { explainStatus, findItems, hallNamed, loadMenu, prepMinutes, quote } from "./dining.ts";
+import { money } from "./diningMenu.ts";
+import { pricePhrase, recommend, resolveHall, type FoodPick, type ScrapedMenus } from "./menus.ts";
 import { loadMemory, noteFact, saveMemory, type Memory } from "./memory.ts";
 import { nearbyKind, nearest } from "./nearby.ts";
 import { groupOf, nearestStop, stopNamed, stopSummary } from "./stops.ts";
@@ -81,6 +81,8 @@ interface Place {
 /** Where to go and by when: what "by bike instead" or "I'm at Geisel" re-plans. */
 interface Trip {
   to: Place;
+  /** Extra stops before `to`, in the order they named them. */
+  via?: Place[];
   /** Be there by this (a class's start), if there's a time. */
   arriveBy: Date | null;
   /** "MATH 20C lecture, Mosaic 0114 at 11:00 AM" */
@@ -115,9 +117,9 @@ export class Assistant {
   /** Set only when this request names a way to travel. Otherwise the fastest way is used. */
   private explicit: TravelMode | null = null;
   private trip: Trip | null = null;
+  /** Coordinates of the route just planned, so a class-plus-food question can list halls on the way. */
+  private lastCoords: LngLat[] | null = null;
   private last: Intent | null = null;
-  /** The last place this chat showed, so "is it actually under $10?" can check that place. */
-  private lastPlace: string | null = null;
   private readonly memory: Memory;
   /** The last reply asked "where are you?": this runs once it's answered. */
   private pending: ((at: Place) => Promise<Reply>) | null = null;
@@ -142,23 +144,25 @@ export class Assistant {
   }
 
   async handle(message: string): Promise<Reply> {
-    const menus = this.campus.menus;
-    const now = new Date();
-    const going = whereTo(message);
-    const found = !going && menus?.items.length ? answerFood(message, menus, now, this.lastPlace) : null;
-    const modelInput = found ? formatQuestion(message, found) : `Facts:\n${factCard(menus, now)}\n\nStudent: ${message}`;
-    const intent = await this.model.read(message, this.last, this.memory.facts, modelInput);
+    // A trip needs a GPS fix. Ask while the agent is still reading the sentence.
+    const preview = parseLocally(message, (code) => this.classes.course(code) != null);
+    if (needsFix(preview)) void this.location.get();
+    const intent = await this.model.read(message, this.last, this.memory.facts);
     console.info("[chat]", this.model.name, intent);
     this.last = intent;
     const noted = this.keep(intent);
     if (intent.mode && intent.action !== "stop") this.explicit = intent.mode;
     else if (intent.action === "class" || intent.action === "route" || intent.action === "nearby" || intent.action === "next" || intent.action === "order") this.explicit = null;
-    const finish = (reply: Reply): Reply =>
-      noted.length ? { ...reply, text: `${reply.text}\nI'll remember: ${noted.join("; ")}.` } : reply;
+    const finish = (reply: Reply): Reply => {
+      let text = reply.text;
+      if (intent.heard) text = `${text}\n(I read that as “${intent.heard}”.)`;
+      if (noted.length) text = `${text}\nI'll remember: ${noted.join("; ")}.`;
+      return text === reply.text ? reply : { ...reply, text };
+    };
 
     // An answer to "where are you?", unless it's a whole new request.
     const pending = this.pending;
-    if (pending && ["change", "other"].includes(intent.action)) {
+    if (pending && this.answersWhere(intent, message)) {
       const place = this.find(intent.from ?? intent.place ?? message);
       if (!place) return finish(this.askWhere(`I couldn't find "${intent.from ?? intent.place ?? message}". Where are you?`, pending));
       this.startAt(place);
@@ -177,28 +181,11 @@ export class Assistant {
       this.from = null;
     }
 
-    if (found) {
-      const spoken = usableReply(intent.reply, found.picks);
-      const picks = spoken
-        ? [...found.picks].sort((a, b) => Number(spoken.toLowerCase().includes(b.name.toLowerCase())) - Number(spoken.toLowerCase().includes(a.name.toLowerCase())))
-        : found.picks;
-      this.last = {
-        action: "order",
-        place: found.ask.hall,
-        item: found.ask.item,
-        minPrice: found.ask.minPrice,
-        maxPrice: found.ask.maxPrice,
-        maxInclusive: found.ask.maxInclusive,
-        reply: spoken,
-      };
-      return finish(await this.presentFood(message, { ...found, picks, lead: spoken ?? found.lead }));
-    }
-
     switch (intent.action) {
       case "class":
-        return Promise.resolve(this.toClass(intent)).then(finish);
+        return Promise.resolve(this.toClass(intent)).then((reply) => this.withFood(intent, reply)).then(finish);
       case "next":
-        return Promise.resolve(this.nextClass()).then(finish);
+        return Promise.resolve(this.nextClass()).then((reply) => this.withFood(intent, reply)).then(finish);
       case "add":
         return Promise.resolve(this.addCourse(intent.course)).then(finish);
       case "drop":
@@ -208,13 +195,7 @@ export class Assistant {
       case "day":
         return Promise.resolve(this.dayPlan(intent.day)).then(finish);
       case "route":
-        if (going?.vagueFood && menus?.items.length) {
-          const hall = pickHall(menus, now);
-          return Promise.resolve(this.toPlace(hall, this.target(intent))).then((reply) =>
-            finish({ ...reply, text: `You didn't name a place, so I picked ${hall}.\n${reply.text}` }),
-          );
-        }
-        if (intent.place) return Promise.resolve(this.toPlace(intent.place, this.target(intent))).then(finish);
+        if (intent.place || intent.to) return Promise.resolve(this.toPlace(intent.place ?? intent.to!, this.target(intent), intent.via)).then(finish);
         break;
       case "nearby":
         return this.nearby(intent.what ?? message, intent.place).then(finish);
@@ -228,13 +209,15 @@ export class Assistant {
           if (target) this.trip = { ...this.trip, arriveBy: target };
           return this.go().then(finish);
         }
+        if (this.from) return finish({ text: `Starting from ${this.from.label}. Where to?` });
+        break;
     }
     return finish({
       text:
         intent.reply ??
         (noted.length
           ? "Got it. I'll use that the next time you ask for directions."
-          : `Tell me where you need to be, like "I have MATH 20C in 30 minutes", "nearest restroom" or "next bus at Gilman". Add your classes with "add MATH 20C", then ask "what do I have today".`),
+          : replyTo(message)),
     });
   }
 
@@ -448,19 +431,26 @@ export class Assistant {
     return this.go();
   }
 
-  private toPlace(query: string, arriveBy: Date | null): Reply | Promise<Reply> {
+  private toPlace(query: string, arriveBy: Date | null, viaNames: string[] = []): Reply | Promise<Reply> {
+    const via: Place[] = [];
+    for (const name of viaNames) {
+      const stop = this.find(name);
+      if (!stop) return this.miss(name, (fixed) => this.toPlace(query, arriveBy, viaNames.map((hop) => (hop === name ? fixed : hop))));
+      via.push(stop);
+    }
     const place = this.find(query);
-    if (place) {
-      this.trip = { to: place, arriveBy, title: `${place.label}${arriveBy ? `, by ${when(arriveBy)}` : ""}`, name: place.label };
-      return this.go();
-    }
-    // A dish rather than a shop ("map me to boba"): the hall that serves it.
-    const menus = this.campus.menus;
-    if (menus?.items.length) {
-      const picks = recommend(menus, { item: query });
-      if (picks.length) return this.orderFromMenus({ action: "order", item: query }, query, menus);
-    }
-    return { text: `I couldn't find "${query}" on campus.` };
+    if (!place) return this.miss(query, (name) => this.toPlace(name, arriveBy, viaNames));
+    const hops = [...via.map((stop) => stop.label), place.label];
+    const title = `${hops.join(", then ")}${arriveBy ? `, by ${when(arriveBy)}` : ""}`;
+    this.trip = {
+      to: place,
+      via: via.length ? via : undefined,
+      arriveBy,
+      title,
+      name: place.label,
+      notes: via.length ? [`Stops in order: ${hops.join(" → ")}.`] : undefined,
+    };
+    return this.go();
   }
 
   /** The nearest restroom, water, coffee… to you (or to the place named), and the way there. */
@@ -471,7 +461,7 @@ export class Assistant {
     let around = "you";
     if (near) {
       const place = this.find(near);
-      if (!place) return { text: `I couldn't find "${near}" on campus.` };
+      if (!place) return this.miss(near, (name) => this.nearby(what, name));
       center = endpointPosition(place.endpoint);
       around = place.label;
     } else {
@@ -500,40 +490,12 @@ export class Assistant {
     return this.go();
   }
 
-  /** Places that take Dining Dollars, Triton Cash, or EBT, and a route to the nearest when asked. */
-  private async payPlaces(tender: Tender, nearestOne: boolean): Promise<Reply> {
-    const label = tender === "dollars" ? "Dining Dollars" : tender === "cash" ? "Triton Cash" : "EBT";
-    const list = placesFor(tender);
-    if (!nearestOne) return { text: list };
-    const here = await this.start();
-    if (!here) return this.askWhere(`${list}\nWhere are you? I'll take you to the nearest place that takes ${label}.`, () => this.payPlaces(tender, true));
-    const at = endpointPosition(here.endpoint);
-    const ranked = tenderPlaces(tender)
-      .flatMap((name) => {
-        const hit = this.find(name);
-        if (!hit) return [];
-        const there = endpointPosition(hit.endpoint);
-        return [{ name, hit, meters: haversine(at[0], at[1], there[0], there[1]) }];
-      })
-      .sort((a, b) => a.meters - b.meters);
-    if (!ranked.length) return { text: list };
-    const [best, ...rest] = ranked;
-    const others = rest.slice(0, 2).map((spot) => `${spot.name} (${distance(spot.meters)})`).join(", ");
-    this.trip = { to: best.hit, arriveBy: null, title: best.name, name: best.name };
-    const routed = await this.go();
-    return {
-      ...routed,
-      text: `${list}\nNearest to ${here.label} is ${best.name}, about ${distance(best.meters)}.${others ? ` Also nearby: ${others}.` : ""}\n${routed.text}`,
-    };
-  }
-
   /**
    * A Triton2Go question: today's HDH price times the quantity, the refundable box,
    * and what the app's wait words actually mean. Then the route to that hall.
    */
   private async orderFood(intent: Intent, message: string): Promise<Reply> {
     const status = explainStatus(message);
-    if (intent.tender && !intent.item) return this.payPlaces(intent.tender, !!intent.nearest);
     const menus = this.campus.menus;
     if (menus?.items.length) return this.orderFromMenus(intent, message, menus, status);
     const hall = hallNamed(intent.place ?? "") ?? hallNamed(message);
@@ -582,64 +544,37 @@ export class Assistant {
 
   /** Recommendations and prices from the scraped menu, then a route to that hall. */
   private async orderFromMenus(intent: Intent, message: string, menus: ScrapedMenus, status?: string): Promise<Reply> {
-    const cleaned = message.toLowerCase().replace(/[’']/g, "'").replace(/\s+/g, " ").trim();
-    const hall = resolveHall(intent.place ?? cleaned) ?? resolveHall(cleaned);
-    const budget = budgetOf(cleaned);
-    const said = dishOf(cleaned, hall);
-    const cheapest = /\b(cheapest|lowest(?:\s+price)?|least expensive|most affordable)\b/.test(cleaned);
+    const namedHall = intent.place ? resolveHall(intent.place) : undefined;
+    const hall = intent.along ? namedHall : (namedHall ?? resolveHall(message));
     const ask = {
       hall,
-      item: said,
-      minPrice: budget.min != null && budget.min > 0 ? budget.min : undefined,
-      maxPrice: budget.max != null && budget.max > 0 ? budget.max : undefined,
-      maxInclusive: budget.max != null && budget.max > 0 && /\b(?:under|below|less than|cheaper than)\b/.test(cleaned) ? false : undefined,
-      sort: cheapest ? ("cheapest" as const) : undefined,
+      item: intent.item,
+      minPrice: intent.minPrice,
+      maxPrice: intent.maxPrice,
+      maxInclusive: intent.maxInclusive,
     };
-    let picks = ask.maxPrice != null && ask.maxPrice <= 0 ? [] : recommend(menus, ask);
-    if (!picks.length && ((ask.maxPrice != null && ask.maxPrice <= 0) || !ask.item)) {
-      const recovered = answerFood(message, menus, new Date(), this.lastPlace);
-      return this.presentFood(message, recovered ?? { ask, picks: recommend(menus, { hall, sort: "cheapest" }, 4), lead: "" });
-    }
+    const picks = recommend(menus, { ...ask, perHall: intent.along ? 8 : undefined }, intent.along ? 200 : 12);
+    if (intent.along && intent.to) return this.foodAlong(intent, menus, picks, status);
     if (!picks.length) {
-      const named = ask.item ? recommend(menus, { item: ask.item, hall }, 1) : [];
-      if (ask.item && !named.length) {
-        const meals = recommend(menus, { sort: "cheapest", meals: true }, 4);
-        if (meals.length) {
-          return this.presentFood(message, {
-            ask: { sort: "cheapest", meals: true },
-            picks: meals,
-            lead: "That isn't a dish on today's menu. Here are meals that are.",
-          });
-        }
-      }
-      const range = pricePhrase(ask.minPrice, ask.maxPrice);
+      const range = pricePhrase(intent.minPrice, intent.maxPrice);
       const where = hall ? ` at ${hall}` : "";
-      const dish = ask.item ? ` matching “${ask.item}”` : "";
+      const dish = intent.item ? ` matching “${intent.item}”` : "";
       return {
         text: `Nothing on today's menu${where}${dish}${range ? ` ${range}` : ""}. Try another hall, or a wider price.`,
       };
     }
-    return this.presentFood(message, { ask, picks, lead: "" }, status);
-  }
-
-  /** Show the dishes and walk to the nearest hall that has them. */
-  private async presentFood(message: string, found: FoodAnswer, status?: string): Promise<Reply> {
-    const { ask, lead } = found;
-    const picks = found.picks;
-    const hall = ask.hall;
-    if (!picks.length) {
-      return { text: lead || "Today's dining menu has nothing that matches." };
-    }
     const from = await this.start();
     if (!from) {
-      const preview = [lead, this.foodBill(picks.slice(0, 4), ask, hall)].filter(Boolean).join("\n");
-      return this.askWhere(`${preview}\nWhere are you? I'll take you to the closest hall that has it.`, () => this.presentFood(message, found, status));
+      const preview = this.foodBill(picks, intent, hall);
+      return this.askWhere(`${preview}\nWhere are you? I'll take you to the closest hall that has it.`, () =>
+        this.orderFromMenus(intent, message, menus, status),
+      );
     }
     const chosen = this.closestHall(picks, from);
     const here = picks.filter((p) => p.hall === chosen);
     const shown = (here.length ? here : picks).slice(0, 4);
     const elsewhere = [...new Set(picks.filter((p) => p.hall !== chosen).map((p) => p.hall))];
-    let bill = this.foodBill(shown, ask, chosen);
+    let bill = this.foodBill(shown, intent, chosen);
     if (elsewhere.length) bill += `\nAlso in range: ${elsewhere.slice(0, 3).join(", ")}.`;
     if (status) bill += ` ${status}`;
     if (/triton2\s?go|\bbox\b/i.test(message)) {
@@ -647,13 +582,81 @@ export class Assistant {
     }
     const place = this.placeFor(chosen);
     this.view.food?.(chosen);
-    if (!place) return { text: [lead, bill].filter(Boolean).join("\n") };
+    if (!place) return { text: bill };
     this.trip = { to: place, arriveBy: null, title: chosen, name: chosen, notes: [] };
     const routed = await this.go();
-    return { ...routed, text: [lead, bill, routed.text].filter(Boolean).join("\n") };
+    return { ...routed, text: `${bill}\n${routed.text}` };
   }
 
-  private foodBill(picks: FoodPick[], intent: { minPrice?: number; maxPrice?: number }, hall?: string): string {
+  /** Dishes under the budget at halls near the walk, then the route they asked for. */
+  private async foodAlong(intent: Intent, menus: ScrapedMenus, picks: FoodPick[], status?: string): Promise<Reply> {
+    const dest = intent.to ? this.find(intent.to) : null;
+    if (!dest) return { text: `I couldn't find "${intent.to}" on campus, so I can't tell which dining halls are on the way.` };
+    const from = await this.start();
+    if (!from) {
+      return this.askWhere(`Anything ${pricePhrase(intent.minPrice, intent.maxPrice) || "to eat"} on the way to ${dest.label}. Where are you starting?`, () =>
+        this.orderFromMenus(intent, intent.to ?? "", menus, status),
+      );
+    }
+    const via = (intent.via ?? []).map((name) => this.find(name)).filter((stop): stop is Place => !!stop);
+    const options = this.planner.compare(
+      from.endpoint,
+      dest.endpoint,
+      undefined,
+      via.map((stop) => stop.endpoint),
+    );
+    const wanted = this.explicit ? options.find((o) => o.mode === this.explicit) : undefined;
+    let coordinates = (wanted ?? options[0])?.planned.route.coordinates;
+    if (!coordinates) {
+      const failed = this.planner.plan(from.endpoint, dest.endpoint, this.explicit ?? "walk", undefined, via.map((stop) => stop.endpoint));
+      if (!failed.ok) return { text: `No route to ${dest.label} from ${from.label}. ${failed.error}` };
+      coordinates = failed.route.coordinates;
+    }
+    const near = this.hallsNearRoute(coordinates, menus);
+    const close = near.filter((hall) => hall.meters <= 280);
+    const keep = new Set((close.length ? close : near.slice(0, 1)).map((hall) => hall.name));
+    const shown = picks.filter((pick) => keep.has(pick.hall)).slice(0, 6);
+    const range = pricePhrase(intent.minPrice, intent.maxPrice);
+    let bill: string;
+    if (!shown.length) {
+      bill = `Nothing on today's menu${range ? ` ${range}` : ""} is open along the way to ${dest.label}.`;
+    } else {
+      const lines = shown.map((pick) => {
+        const off = near.find((hall) => hall.name === pick.hall);
+        const aside = off && off.meters > 45 ? `, ${distance(off.meters)} off the path` : ", on the way";
+        const price = pick.price != null ? money(pick.price) : "no price listed";
+        const when = pick.open && pick.hours && pick.hours !== "Closed" ? `open ${pick.hours}` : "closed now";
+        return `• ${pick.name} — ${pick.station} at ${pick.hall}, ${price}, ${when}${aside}`;
+      });
+      bill = `On the way to ${dest.label}${range ? `, ${range}` : ""}:\n${lines.join("\n")}`;
+    }
+    if (status) bill += ` ${status}`;
+    if (shown[0]) this.view.food?.(shown[0].hall);
+    this.trip = { to: dest, arriveBy: null, title: dest.label, name: dest.label, notes: [] };
+    const routed = await this.go();
+    return { ...routed, text: `${bill}\n${routed.text}` };
+  }
+
+  /** How far each dining hall sits from the path. Closest first. */
+  private hallsNearRoute(coordinates: LngLat[], menus: ScrapedMenus): { name: string; meters: number }[] {
+    const step = Math.max(1, Math.floor(coordinates.length / 80));
+    const sampled = coordinates.filter((_, index) => index % step === 0);
+    const found: { name: string; meters: number }[] = [];
+    for (const hall of menus.halls) {
+      const place = this.placeFor(hall.name);
+      if (!place) continue;
+      const at = endpointPosition(place.endpoint);
+      let best = Number.POSITIVE_INFINITY;
+      for (const point of sampled) {
+        const meters = haversine(at[0], at[1], point[0], point[1]);
+        if (meters < best) best = meters;
+      }
+      found.push({ name: hall.name, meters: best });
+    }
+    return found.sort((a, b) => a.meters - b.meters);
+  }
+
+  private foodBill(picks: FoodPick[], intent: Intent, hall?: string): string {
     const range = pricePhrase(intent.minPrice, intent.maxPrice);
     const open = picks.some((p) => p.open);
     const head = hall && picks.every((p) => p.hall === hall) ? hall : "Dining";
@@ -690,8 +693,8 @@ export class Assistant {
   }
 
   private placeFor(hall: string): Place | null {
-    for (const query of [HALL_PLACE[hall], hall]) {
-      if (!query) continue;
+    const pin = diningPin(hall);
+    for (const query of pin === hall ? [hall] : [pin, hall]) {
       const place = this.find(query);
       if (place) return place;
     }
@@ -729,23 +732,84 @@ export class Assistant {
     };
   }
 
+  /** A short place name while we're asking "where are you?" is the start, not a new trip. */
+  private answersWhere(intent: Intent, message: string): boolean {
+    if (["class", "order", "nearby", "stop", "next", "add", "drop", "day", "classes"].includes(intent.action)) return false;
+    if (intent.course || intent.to || intent.item) return false;
+    const words = message.trim().split(/\s+/).length;
+    if (intent.action === "route" && words > 5) return false;
+    if (intent.action === "route" && /\b(?:from|to|via|then)\b/i.test(message) && words > 3) return false;
+    if (intent.via?.length) return false;
+    return intent.action === "change" || intent.action === "other" || intent.action === "route";
+  }
+
+  /** Search hits for a name we couldn't place, so a typo can be picked instead of a dead end. */
+  private miss(query: string, go: (name: string) => Reply | Promise<Reply>): Reply {
+    const seen = new Set<string>();
+    const choices: NonNullable<Reply["choices"]> = [];
+    const seeds = [query, ...query.split(/\s+/).filter((word) => word.length > 3)];
+    for (const seed of seeds) {
+      for (const hit of this.campus.search.search(seed, { limit: 3 })) {
+        const name = label(hit);
+        if (seen.has(name)) continue;
+        seen.add(name);
+        choices.push({ label: name, pick: async () => go(name) });
+        if (choices.length >= 4) break;
+      }
+      if (choices.length >= 4) break;
+    }
+    if (!choices.length) return { text: `I couldn't find "${query}" on campus. Try Geisel, Price Center, or a room like "WLH 2001".` };
+    return { text: `I couldn't find "${query}". Did you mean one of these?`, choices };
+  }
+
+  /** Food along a class route, when the same message also asked what to eat. */
+  private withFood(intent: Intent, reply: Reply): Reply {
+    if (!reply.steps?.length || !intent.along) return reply;
+    const menus = this.campus.menus;
+    const coords = this.lastCoords;
+    if (!menus?.items.length || !coords?.length) return reply;
+    const picks = recommend(menus, {
+      hall: intent.place ? resolveHall(intent.place) : undefined,
+      item: intent.item,
+      minPrice: intent.minPrice,
+      maxPrice: intent.maxPrice,
+      maxInclusive: intent.maxInclusive,
+    }, 40);
+    const near = this.hallsNearRoute(coords, menus);
+    const close = near.filter((hall) => hall.meters <= 280);
+    const keep = new Set((close.length ? close : near.slice(0, 1)).map((hall) => hall.name));
+    const shown = picks.filter((pick) => keep.has(pick.hall)).slice(0, 4);
+    if (!shown.length) return reply;
+    const range = pricePhrase(intent.minPrice, intent.maxPrice);
+    const lines = shown.map((pick) => {
+      const off = near.find((hall) => hall.name === pick.hall);
+      const aside = off && off.meters > 45 ? `, ${distance(off.meters)} off the path` : ", on the way";
+      const price = pick.price != null ? money(pick.price) : "no price listed";
+      return `• ${pick.name} at ${pick.hall}, ${price}${aside}`;
+    });
+    if (shown[0]) this.view.food?.(shown[0].hall);
+    return { ...reply, text: `On the way${range ? `, ${range}` : ""}:\n${lines.join("\n")}\n${reply.text}` };
+  }
+
   /** Plan the current trip from where you are (or the start you named), draw it, and say when to leave. */
   private async go(): Promise<Reply> {
     const trip = this.trip;
+    this.lastCoords = null;
     if (!trip) return { text: "Where do you want to go?" };
     const from = await this.start();
     if (!from) return this.askWhere(`${trip.title}. Where are you starting from?`, () => this.go());
-    const options = this.planner.compare(from.endpoint, trip.to.endpoint, trip.arriveBy ?? undefined);
+    const via = (trip.via ?? []).map((stop) => stop.endpoint);
+    const options = this.planner.compare(from.endpoint, trip.to.endpoint, trip.arriveBy ?? undefined, via);
     const wanted = this.explicit ? options.find((o) => o.mode === this.explicit) : undefined;
     const picked = wanted ?? options[0];
     if (!picked) {
       this.view.trip(null);
       return { text: `${trip.title}. No route from ${from.label}.` };
     }
-    if (trip.name) this.lastPlace = trip.name;
     this.mode = picked.mode;
     const planned = picked.planned;
     const route = planned.route;
+    this.lastCoords = route.coordinates;
     this.view.trip({ from: from.endpoint, to: trip.to.endpoint, mode: picked.mode, arriveBy: trip.arriveBy, title: trip.title, name: trip.name, route });
     const minutes = Math.max(1, Math.ceil(planned.minutes));
     const fastest = options[0];
@@ -763,10 +827,6 @@ export class Assistant {
       `${trip.title}.`,
       `${asked}${choice} from ${from.label}: ${minutes} min, ${distance(route.meters)}. ${leaveAdvice(route, picked.mode, minutes, trip.arriveBy, this.arriveEarlyMin)}`.trim(),
       also ? `Also: ${also}.` : "",
-      // The shortest-route skill: mention stairs on the fastest walk, and offer the step-free way.
-      picked.mode === "walk" && route.stairSegments > 0
-        ? `This walk takes stairs.${others.some((o) => o.mode === "accessible") ? " Pick No stairs below for a step-free route." : ""}`
-        : "",
       usual && !this.explicit ? `You usually ${MODES[usual.mode].label.toLowerCase()} (${Math.max(1, Math.ceil(usual.planned.minutes))} min). Say so if you want that instead.` : "",
       ...this.transitLines(route),
       ...this.insideLines(trip.to.endpoint, route),
@@ -852,19 +912,14 @@ export class Assistant {
   }
 
   private find(query: string): Place | null {
-    const hits = this.campus.search.search(query, { limit: 8 });
-    const q = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    // A food stall ("Taco Bell") should beat a building the words only partly match.
-    const stall = hits.find((hit) => {
-      if (hit.kind !== "place") return false;
-      return [hit.place.name, ...hit.place.aliases].some((name) => {
-        const n = name.toLowerCase();
-        return n === q || n.includes(q) || q.includes(n);
-      });
-    });
-    const hit = stall ?? hits[0];
+    const hit = this.campus.search.search(query, { limit: 1 })[0];
     return hit ? { endpoint: endpoint(hit), label: label(hit) } : null;
   }
+}
+
+/** A trip, a stop, or a follow-up. "What are my classes" does not need a GPS fix. */
+function needsFix(intent: Intent): boolean {
+  return intent.action === "route" || intent.action === "class" || intent.action === "nearby" || intent.action === "order" || intent.action === "stop" || intent.action === "next" || intent.action === "change";
 }
 
 /** "Leave by 10:49 AM (in 17 min).", aiming to arrive `earlyMin` minutes before `arriveBy`. */

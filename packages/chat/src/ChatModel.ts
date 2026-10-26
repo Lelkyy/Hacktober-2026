@@ -1,7 +1,6 @@
+import { AGENT_SCHEMA, agentPrompt, intentFromAgent, modelSize } from "./agent.ts";
 import type { ChatSettings } from "./types.ts";
-import { foodSkill, turnSkill } from "./agent.ts";
-import { cleanIntent, INTENT_SCHEMA, parseLocally, systemPrompt, type Intent } from "./intent.ts";
-import { SHORTEST_ROUTE } from "./skill.ts";
+import { carryOver, needsModel, parseLocally, type Intent } from "./intent.ts";
 
 /** Chrome's built-in model (the Prompt API). Not in TypeScript's DOM types yet. */
 interface ChromeModel {
@@ -25,13 +24,16 @@ type Brain =
   | { kind: "patterns" };
 
 /**
- * Reads chat messages into an Intent with a language model on this computer:
- * Gemma through LM Studio (the dev server's /lmstudio proxy), else Gemma through
- * Ollama, else Chrome's built-in model. Otherwise, and whenever the model
- * fails, the pattern parser, so the chat always answers.
+ * Reads a chat line into an Intent.
+ * A clear request stays on the local reader. A hard one is one tool call
+ * (Qwen in LM Studio, else Ollama, else Chrome), with thinking off.
+ * That call gets the campus skills the line needs (`skillPrompt`).
+ * If that call fails, the local reader answers.
  */
 export class ChatModel {
   private brain: Brain = { kind: "patterns" };
+  /** Last time we peeked at LM Studio without blocking the reply. */
+  private lookedAt = 0;
 
   constructor(
     private readonly settings: Pick<ChatSettings, "gemma" | "lmStudioModel" | "ollamaModel">,
@@ -39,7 +41,7 @@ export class ChatModel {
     private readonly onStatus: (message: string) => void,
   ) {}
 
-  /** Find a model: LM Studio Gemma, else Ollama, else Chrome's built-in one. Never throws. */
+  /** Find a model: Qwen in LM Studio, else Ollama, else Chrome's built-in one. Never throws. */
   async connect(): Promise<void> {
     if (this.settings.gemma === "off" || new URLSearchParams(location.search).get("gemma") === "off") {
       this.onStatus("The language model is off. Using simple patterns.");
@@ -49,7 +51,7 @@ export class ChatModel {
     const installed = await this.installedModel();
     if (installed) {
       this.brain = { kind: "ollama", model: installed };
-      this.onStatus(`Gemma (${installed}, installed through Ollama) is ready${WITH_SKILL}.`);
+      this.onStatus(`${installed} is ready.`);
       return;
     }
     const chrome = globalThis.LanguageModel;
@@ -58,7 +60,7 @@ export class ChatModel {
         const state = await chrome.availability(LANGUAGES);
         if (state !== "unavailable") {
           this.brain = { kind: "chrome", model: chrome, ready: state === "available" };
-          this.onStatus(state === "available" ? `Chrome's built-in AI is ready${WITH_SKILL}.` : "Chrome will download its built-in AI (once) when you send your first message.");
+          this.onStatus(state === "available" ? "Chrome's built-in AI is ready." : "Chrome will download its built-in AI (once) when you send your first message.");
           return;
         }
       } catch {
@@ -70,15 +72,16 @@ export class ChatModel {
     );
   }
 
-  /** A Gemma model Ollama already has. Ollama can be slow to wake, so this waits and tries twice. */
+  /** The configured model, if Ollama already has it. Ollama can be slow to wake, so this waits and tries twice. */
   private async installedModel(): Promise<string | null> {
+    const want = this.settings.ollamaModel.split(":")[0].toLowerCase();
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const res = await fetch("/ollama/api/tags", { signal: AbortSignal.timeout(8000) });
         if (!res.ok) return null;
         const { models } = (await res.json()) as { models?: { name: string }[] };
-        const names = (models ?? []).map((m) => m.name);
-        return names.find((n) => n === this.settings.ollamaModel) ?? names.find((n) => n.startsWith("gemma")) ?? null;
+        const names = (models ?? []).map((m) => m.name).filter(isChatModel);
+        return pickModel(names, this.settings.ollamaModel) ?? names.find((n) => n.toLowerCase().startsWith(want)) ?? null;
       } catch {
         // Cold start: one more try.
       }
@@ -86,22 +89,19 @@ export class ChatModel {
     return null;
   }
 
-  /** Gemma 4 in LM Studio, via the Vite `/lmstudio` proxy to http://127.0.0.1:1234. */
+  /** Qwen in LM Studio, via the Vite `/lmstudio` proxy to http://127.0.0.1:1234. */
   private async connectLmStudio(): Promise<boolean> {
     try {
       const res = await fetch("/lmstudio/v1/models", { signal: AbortSignal.timeout(1500) });
       if (!res.ok) return false;
       const { data } = (await res.json()) as { data?: { id: string }[] };
-      const names = (data ?? []).map((m) => m.id);
+      const names = (data ?? []).map((m) => m.id).filter(isChatModel);
       const wanted = this.settings.lmStudioModel;
-      const model =
-        names.find((n) => n === wanted) ??
-        names.find((n) => /gemma-?4/i.test(n)) ??
-        names.find((n) => /gemma/i.test(n)) ??
-        (names.length === 0 ? wanted : undefined);
+      const model = pickModel(names, wanted) ?? (names.length === 0 ? wanted : undefined);
       if (!model) return false;
       this.brain = { kind: "lmstudio", model };
-      this.onStatus(`Gemma (${model}, through LM Studio) is ready${WITH_SKILL}.`);
+      const slow = modelSize(model) >= 12 && model !== wanted;
+      this.onStatus(slow ? `${model} is ready. Load ${wanted} if you want faster replies.` : `${model} is ready.`);
       return true;
     } catch {
       return false;
@@ -110,79 +110,43 @@ export class ChatModel {
 
   get name(): string {
     if (this.brain.kind === "chrome") return "Chrome built-in AI";
-    if (this.brain.kind === "lmstudio") return `Gemma (${this.brain.model})`;
-    if (this.brain.kind === "ollama") return `Gemma (${this.brain.model})`;
+    if (this.brain.kind === "lmstudio" || this.brain.kind === "ollama") return this.brain.model;
     return "patterns";
   }
 
-  /**
-   * `previous`: the request being changed, so "by bike instead" makes sense.
-   * `facts`: details already remembered.
-   * `modelInput`: the question the model sees, when the raw sentence has been rewritten with the facts it needs.
-   */
-  async read(message: string, previous: Intent | null, facts: string[] = [], modelInput?: string): Promise<Intent> {
-    const fallback = parseLocally(message, this.isCourse);
-    const body = modelInput ?? message;
-    const input = modelInput ? modelInput : previous ? `Previous request: ${JSON.stringify(previous)}\n${body}` : body;
+  /** `previous`: the request being changed, so "by bike instead" makes sense. `facts`: details already remembered. */
+  async read(message: string, previous: Intent | null, facts: string[] = []): Promise<Intent> {
+    const local = carryOver(parseLocally(message, this.isCourse), previous, message);
+    // A clear request never waits on a model. A hard one gets one tool call.
+    if (!needsModel(message, local)) return local;
+    if (this.brain.kind === "patterns") {
+      this.lookForModel();
+      return local;
+    }
+    const input = previous ? `Previous request: ${JSON.stringify(previous)}\nNew message: ${message}` : message;
     try {
-      const skill = !modelInput ? undefined : modelInput.startsWith("Fill this JSON") ? foodSkill() : turnSkill();
-      const answer = await this.ask(input, facts, skill);
-      const intent = answer === null ? null : cleanIntent(JSON.parse(jsonObject(answer)));
-      if (!intent) return fallback;
-      // A lasting detail the patterns caught ("I usually bike") even if the model left remember empty.
-      if (!intent.remember?.length && fallback.remember) intent.remember = fallback.remember;
-      // A lasting detail's mode and start, when the model answered the trip but skipped them.
-      if (!intent.from && fallback.from) intent.from = fallback.from;
-      if (fallback.remember && !intent.mode && fallback.mode) intent.mode = fallback.mode;
-      // "2 bobas at Pines, how long and where" is an order even if the model reads "where" as a route.
-      // "map me to Taco Bell" is a route even if the model files it as something else.
-      if (fallback.action === "route" && fallback.place) {
-        intent.action = "route";
-        intent.place = fallback.place;
-      }
-      if (fallback.action === "order") {
-        intent.action = "order";
-        intent.place = fallback.place ?? intent.place;
-        // A dish is only what the words name. The model's paraphrase of the question is not one.
-        intent.item = fallback.item;
-        intent.quantity = fallback.quantity ?? intent.quantity;
-        // A price is only real when the student's words named it. The model invents caps like $0.75.
-        intent.minPrice = fallback.minPrice;
-        intent.maxPrice = fallback.maxPrice;
-        intent.maxInclusive = fallback.maxInclusive;
-        if (fallback.tender) {
-          intent.tender = fallback.tender;
-          intent.nearest = fallback.nearest || intent.nearest;
-          intent.item = undefined;
-          intent.place = undefined;
-        }
-      }
-      // The model reads sentences better; the patterns know which course codes exist.
-      if (intent.course && !this.isCourse(intent.course)) intent.course = fallback.course;
-      if (!intent.course && fallback.course && intent.action !== "route") {
-        intent.action = "class";
-        intent.course = fallback.course;
-      }
-      return intent;
+      const answer = await withTimeout(this.ask(input, facts, message, local), 5_000);
+      const intent = answer === null ? null : intentFromAgent(JSON.parse(jsonObject(answer)), local, message, this.isCourse);
+      return intent ?? local;
     } catch (err) {
       console.warn("[chat] The model failed, using patterns:", err);
-      return fallback;
+      return local;
     }
   }
 
   /** The model's raw JSON answer, or null when there's no model to ask. */
-  private async ask(input: string, facts: string[], skill?: string): Promise<string | null> {
+  private async ask(input: string, facts: string[], message: string, local: Intent): Promise<string | null> {
     const now = new Date();
-    const system = skill ?? systemPrompt(now, facts);
+    const prompt = agentPrompt(now, facts, message, local);
     if (this.brain.kind === "chrome") {
       if (!this.brain.ready) {
         this.download(this.brain);
         return null;
       }
-      // A fresh session each time: the date and time in the instructions stay current.
-      const session = await this.brain.model.create({ ...LANGUAGES, initialPrompts: [{ role: "system", content: system }] });
+      // A fresh session each time: the date, time, and skills for this line stay current.
+      const session = await this.brain.model.create({ ...LANGUAGES, initialPrompts: [{ role: "system", content: prompt }] });
       try {
-        return await session.prompt(input, { responseConstraint: INTENT_SCHEMA });
+        return await session.prompt(input, { responseConstraint: AGENT_SCHEMA });
       } finally {
         session.destroy();
       }
@@ -191,17 +155,18 @@ export class ChatModel {
       const res = await fetch("/lmstudio/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(5_000),
         body: JSON.stringify({
           model: this.brain.model,
           temperature: 0,
+          max_tokens: 120,
+          // Qwen and Gemma think before they answer. A tool call has nothing to think about.
+          reasoning_effort: "none",
+          chat_template_kwargs: { enable_thinking: false },
           messages: [
-            { role: "system", content: system },
+            { role: "system", content: prompt },
             { role: "user", content: input },
           ],
-          response_format: {
-            type: "json_schema",
-            json_schema: { name: "intent", schema: INTENT_SCHEMA },
-          },
         }),
       });
       if (!res.ok) throw new Error(`LM Studio ${res.status}`);
@@ -212,13 +177,15 @@ export class ChatModel {
       const res = await fetch("/ollama/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(5_000),
         body: JSON.stringify({
           model: this.brain.model,
           stream: false,
-          format: INTENT_SCHEMA,
-          options: { temperature: 0 },
+          think: false,
+          format: AGENT_SCHEMA,
+          options: { temperature: 0, num_predict: 120 },
           messages: [
-            { role: "system", content: system },
+            { role: "system", content: prompt },
             { role: "user", content: input },
           ],
         }),
@@ -228,6 +195,14 @@ export class ChatModel {
       return body.message?.content ?? null;
     }
     return null;
+  }
+
+  /** Look for LM Studio without making this reply wait. */
+  private lookForModel(): void {
+    const now = Date.now();
+    if (now - this.lookedAt < 4_000) return;
+    this.lookedAt = now;
+    void this.connectLmStudio();
   }
 
   /**
@@ -249,7 +224,7 @@ export class ChatModel {
       .then((session) => {
         session.destroy();
         brain.ready = true;
-        this.onStatus(`Chrome's built-in AI is ready${WITH_SKILL}.`);
+        this.onStatus("Chrome's built-in AI is ready.");
       })
       .catch((err: unknown) => {
         brain.downloading = false;
@@ -268,7 +243,29 @@ function jsonObject(raw: string): string {
   return start >= 0 && end > start ? text.slice(start, end + 1) : text;
 }
 
-/** Said once a model is ready: it reads the skill with every message. */
-const WITH_SKILL = `, with the ${SHORTEST_ROUTE.name} skill`;
-
 const LANGUAGES = { expectedInputs: [{ type: "text", languages: ["en"] }], expectedOutputs: [{ type: "text", languages: ["en"] }] };
+
+/** Embeddings and speech models are not the chat model. */
+function isChatModel(id: string): boolean {
+  return !/embed|phonon|whisper/i.test(id);
+}
+
+/** The configured id, else the smallest model of that family, else the smallest loaded chat model. */
+function pickModel(names: string[], wanted: string): string | undefined {
+  const exact = names.find((name) => name.toLowerCase() === wanted.toLowerCase());
+  if (exact) return exact;
+  const family = /qwen/i.test(wanted) ? "qwen" : /gemma/i.test(wanted) ? "gemma" : wanted.split(/[/:]/)[0].toLowerCase();
+  const same = names.filter((name) => name.toLowerCase().includes(family)).sort((a, b) => modelSize(a) - modelSize(b));
+  if (same.length) return same[0];
+  // A loaded Gemma is the model we moved off of. Don't pick it when another family was asked for.
+  if (/gemma/i.test(wanted)) return [...names].sort((a, b) => modelSize(a) - modelSize(b))[0];
+  const other = names.filter((name) => !/gemma/i.test(name));
+  return [...other].sort((a, b) => modelSize(a) - modelSize(b))[0];
+}
+
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("model timeout")), ms);
+    work.then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}

@@ -10,7 +10,7 @@ description: >-
 
 # Shortest-time campus route
 
-Use this project's path graph. Do not invent streets or use Google/Apple Maps.
+Use this project's path graph. Do not invent streets or use Google/Apple Maps. When the chat model runs on a trip, `agentPrompt` attaches this skill from `packages/chat/src/skills.ts`.
 
 ## Workflow
 
@@ -25,9 +25,11 @@ Use this project's path graph. Do not invent streets or use Google/Apple Maps.
 npx tsx .cursor/skills/shortest-route/scripts/shortest-route.ts --from "<origin>" --to "<destination>"
 ```
 
+Repeat `--via "<stop>"` for extra places, in the order they named them (`then` / `via` / `through`). Path hop by hop. Do not skip a named stop.
+
 Pass `--json` when you need structured output. Pass `--mode walk|bike|bus|accessible` only when they asked for that mode. Default compares Walk, Bike, and Transit and picks the **shortest door-to-door time** (`walkWeight: 1`).
 
-4. **Reply** with the fastest mode, minutes, distance, the comparison, and the turn-by-turn list. Mention stairs if the fastest walk uses them; offer `--mode accessible` if they need no stairs.
+4. **Reply** with the `campus-answer` skill: fastest mode, minutes, distance, the comparison, and the turn-by-turn list. Mention stairs if the fastest walk uses them; offer `--mode accessible` if they need no stairs. The app uses the same slots through `integrateIntent` and `TripPlanner.compare`.
 
 ## Examples
 
@@ -40,6 +42,9 @@ User: "Fastest way from Warren Lecture Hall to Geisel"
 
 User: "No stairs from CSE to Geisel"
 - `--from CSE --to Geisel --mode accessible`
+
+User: "Price Center then Geisel then WLH"
+- `--from "<start>" --via "Price Center" --via Geisel --to WLH`
 
 ## Rules
 

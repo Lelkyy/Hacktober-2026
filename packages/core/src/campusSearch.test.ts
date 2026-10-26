@@ -119,6 +119,14 @@ describe("CampusSearch", () => {
     expect(search.search("revelle").slice(0, 3).some((h) => h.kind === "place" && h.place.id === "lingo-revelle")).toBe(true);
   });
 
+  it("sends a college name to the college, not a residence hall that mentions it", () => {
+    expect(first("muir")).toBe("building Stewart Commons");
+    expect(first("revelle")).toBe("building Revelle Commons");
+    expect(first("marshall")).toBe("building Oceanview Terrace Lounge");
+    expect(first("price")).toMatch(/^building Price Center$/);
+    expect(first("literature")).toBe("building Halicioglu Data Science Institute");
+  });
+
   it("finds buildings by code, name, part of a name and with typos", () => {
     expect(first("CSE")).toBe("building Computer Science & Engineering");
     expect(first("wlh")).toBe("building Warren Lecture Hall");

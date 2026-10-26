@@ -1,5 +1,7 @@
 /** HDH menus written by `npm run fetch:menus`. Wait times are not in this file. */
 
+import { nameKey } from "@campus/core";
+
 export interface DiningHours {
   day: string;
   open: string;
@@ -56,32 +58,12 @@ const WEEK_NAME: Record<string, string> = {
   SAT: "Saturday",
 };
 
-/** Campus-map pin for a hall whose map name isn't the hall's name. */
-const HALL_PIN: Record<string, string> = {
-  Bistro: "The Bistro at the Strand",
-  "Cecil's at Faculty Club": "Ida and Cecil Green Faculty Club",
-  "Restaurants at Sixth College": "Crave",
-};
-
-/** Names people tap that aren't the hall's own name. */
+/** Map labels that aren't the hall or station's own name. */
 const ALIASES: Record<string, string> = {
   "the bistro at the strand": "bistro",
   "ida and cecil green faculty club": "cecil s at faculty club",
   "the rooftop": "rooftop",
 };
-
-export function nameKey(name: string): string {
-  return name
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-export function hallPinName(hall: string): string {
-  return HALL_PIN[hall] ?? hall;
-}
 
 export function findDining(menus: DiningMenus, label: string): DiningMatch | null {
   const key = ALIASES[nameKey(label)] ?? nameKey(label);
@@ -126,7 +108,7 @@ export function addDays(iso: string, days: number): string {
 }
 
 /** The menu day to show: today, or the same weekday from the file when today isn't in it. */
-export function menuDate(menus: DiningMenus, now = new Date()): string {
+export function menuDate(menus: { days: { date: string }[]; items: { date: string }[] }, now = new Date()): string {
   const today = localDate(now);
   if (menus.items.some((item) => item.date === today) || menus.days.some((day) => day.date === today)) return today;
   const want = WEEK[new Date(`${today}T12:00:00`).getDay()];
@@ -143,7 +125,7 @@ function weekday(iso: string): string {
   return WEEK[new Date(`${iso}T12:00:00`).getDay()];
 }
 
-export function hoursOn(station: DiningStation, iso: string): string | null {
+export function hoursOn(station: { hours: DiningHours[] }, iso: string): string | null {
   const row = station.hours.find((h) => h.day === weekday(iso));
   if (!row) return null;
   if (row.open === "Closed" || row.close === "Closed") return "Closed";
@@ -164,7 +146,7 @@ function clockMinutes(label: string): number | null {
 }
 
 /** True when `now`'s clock falls inside this station's hours for `iso`, including a close after midnight. */
-export function isOpenAt(station: DiningStation, iso: string, now = new Date()): boolean {
+export function isOpenAt(station: { hours: DiningHours[] }, iso: string, now = new Date()): boolean {
   const row = station.hours.find((h) => h.day === weekday(iso));
   if (row && spans(row, now, false)) return true;
   const yesterday = station.hours.find((h) => h.day === weekday(addDays(iso, -1)));
@@ -198,15 +180,16 @@ export function nextOpen(station: DiningStation, iso: string): string | null {
   return null;
 }
 
-export function pickMeal(meals: string[], now = new Date()): string {
+/** Breakfast through late night, with the meal for this hour first. */
+export function mealOrder(now = new Date()): string[] {
   const hour = now.getHours();
-  const order =
-    hour < 11
-      ? ["Breakfast", "Brunch", "Lunch", "Lunch Dinner", "Dinner", "Late Night"]
-      : hour < 16
-        ? ["Lunch", "Brunch", "Lunch Dinner", "Dinner", "Late Night", "Breakfast"]
-        : ["Dinner", "Late Night", "Lunch Dinner", "Lunch", "Brunch", "Breakfast"];
-  return order.find((meal) => meals.includes(meal)) ?? meals[0] ?? "";
+  if (hour < 11) return ["Breakfast", "Brunch", "Lunch", "Lunch Dinner", "Dinner", "Late Night"];
+  if (hour < 16) return ["Lunch", "Brunch", "Lunch Dinner", "Dinner", "Late Night", "Breakfast"];
+  return ["Dinner", "Late Night", "Lunch Dinner", "Lunch", "Brunch", "Breakfast"];
+}
+
+export function pickMeal(meals: string[], now = new Date()): string {
+  return mealOrder(now).find((meal) => meals.includes(meal)) ?? meals[0] ?? "";
 }
 
 export function money(price: number): string {

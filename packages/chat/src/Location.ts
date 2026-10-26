@@ -8,6 +8,8 @@ export class Location {
   private at: LngLat | null = null;
   private watching = false;
   private denied = false;
+  /** One browser request, shared if a trip asks twice before the fix arrives. */
+  private pending: Promise<LngLat | null> | null = null;
 
   constructor(
     /** Campus [west, south, east, north]: farther away, routes can't start from you. */
@@ -42,9 +44,21 @@ export class Location {
   async get(): Promise<LngLat | null> {
     if (this.at) return this.at;
     if (this.denied || !navigator.geolocation) return null;
-    const at = await new Promise<LngLat | null>((resolve) =>
+    this.pending ??= this.locate().finally(() => {
+      this.pending = null;
+    });
+    return this.pending;
+  }
+
+  private locate(): Promise<LngLat | null> {
+    return new Promise((resolve) =>
       navigator.geolocation.getCurrentPosition(
-        (p) => resolve([p.coords.longitude, p.coords.latitude]),
+        (p) => {
+          const at: LngLat = [p.coords.longitude, p.coords.latitude];
+          this.moved(at);
+          this.follow();
+          resolve(at);
+        },
         (err) => {
           if (err.code === err.PERMISSION_DENIED) this.denied = true;
           resolve(null);
@@ -52,11 +66,6 @@ export class Location {
         { enableHighAccuracy: true, timeout: 8000, maximumAge: 30_000 },
       ),
     );
-    if (at) {
-      this.moved(at);
-      this.follow();
-    }
-    return at;
   }
 
   onCampus(at: LngLat): boolean {

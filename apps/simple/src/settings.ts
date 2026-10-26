@@ -14,12 +14,12 @@ export const settings = {
   minZoom: 13.5,
   /** Room around the campus data's bounding box the map can pan to: enough to see the shore. */
   boundsPaddingDeg: 0.006,
-  /** "auto": Gemma in LM Studio, else Ollama, else Chrome's built-in AI, else simple patterns. "off": patterns only (also ?gemma=off in the URL). */
+  /** "auto": Qwen in LM Studio, else Ollama, else Chrome's built-in AI, else simple patterns. "off": patterns only (also ?gemma=off in the URL). */
   gemma: "auto" as "auto" | "off",
   /** LM Studio model id (`lms ls`). Load it and start the local server on port 1234. */
-  lmStudioModel: "google/gemma-4-e4b",
-  /** The Ollama model to use when LM Studio isn't running. Any "gemma…" model Ollama has works too. */
-  ollamaModel: "gemma3:4b",
+  lmStudioModel: "qwen/qwen3.5-9b",
+  /** The Ollama model to use when LM Studio isn't running. */
+  ollamaModel: "qwen3.5:9b",
   /** Aim to reach class this many minutes before it starts. */
   arriveEarlyMin: 2,
 };

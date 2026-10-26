@@ -18,22 +18,25 @@ import {
   buildingAt,
   buildSteps,
   endpointLabel,
+  joinRoutes,
+  planRoute,
   type Building,
   type Endpoint,
   type GraphData,
   type IndoorData,
+  type ModeId,
   type Place,
   type PlacesData,
+  type Route,
   type SearchHit,
   type TransitData,
 } from "@campus/core";
-import { compareModes, SKILL_MODES, type SkillMode } from "./router.ts";
 
-const TIME_MODES: SkillMode[] = ["walk", "bike", "bus"];
+const TIME_MODES: ModeId[] = ["walk", "bike", "bus"];
 const DATA = resolve(repoRoot(), "apps/web/public/data");
 
 function repoRoot(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../../../../..");
 }
 
 function loadJson<T>(name: string): T {
@@ -47,6 +50,14 @@ function arg(flag: string): string | undefined {
 
 function hasFlag(flag: string): boolean {
   return process.argv.includes(flag);
+}
+
+function args(flag: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < process.argv.length - 1; i++) {
+    if (process.argv[i] === flag) out.push(process.argv[i + 1]);
+  }
+  return out;
 }
 
 /** lat,lng or a search query. */
@@ -120,17 +131,35 @@ function fmtMeters(m: number): string {
   return m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
 }
 
+function joinRoutes(parts: Route[]): Route {
+  if (parts.length === 1) return parts[0];
+  const seconds = parts.reduce((sum, part) => sum + part.seconds, 0);
+  return {
+    legs: parts.flatMap((part) => part.legs),
+    coordinates: parts.flatMap((part, index) => (index === 0 ? part.coordinates : part.coordinates.slice(1))),
+    meters: parts.reduce((sum, part) => sum + part.meters, 0),
+    seconds,
+    minutes: seconds / 60,
+    stairSegments: parts.reduce((sum, part) => sum + part.stairSegments, 0),
+    leaveAt: parts[0].leaveAt,
+    arriveAt: parts[parts.length - 1].arriveAt,
+    usesTransit: parts.some((part) => part.usesTransit),
+  };
+}
+
 async function main() {
   const fromRaw = arg("--from");
   const toRaw = arg("--to");
-  const modeArg = arg("--mode") as SkillMode | undefined;
+  const viaRaws = args("--via");
+  const modeArg = arg("--mode") as ModeId | undefined;
   const json = hasFlag("--json");
   if (!fromRaw || !toRaw || hasFlag("--help")) {
     console.error(
       [
-        "Usage: npx tsx .cursor/skills/shortest-route/scripts/shortest-route.ts --from <here|name|lat,lng> --to <name|lat,lng> [--mode walk|bike|bus|accessible] [--json]",
+        "Usage: npx tsx .cursor/skills/shortest-route/scripts/shortest-route.ts --from <here|name|lat,lng> --to <name|lat,lng> [--via <name>]… [--mode walk|bike|bus|accessible] [--json]",
         "",
         "Default: compare Walk, Bike, and Transit and pick the shortest door-to-door time.",
+        "Repeat --via for extra stops, in the order they named them.",
       ].join("\n"),
     );
     process.exit(fromRaw && toRaw ? 0 : 1);
@@ -155,31 +184,63 @@ async function main() {
     if (to.suggestions?.length) console.error("Did you mean:", to.suggestions.join(", "));
     process.exit(1);
   }
+  const vias: { endpoint: Endpoint; matched: string }[] = [];
+  for (const raw of viaRaws) {
+    const stop = resolveEndpoint(raw, raw, search, buildings);
+    if ("error" in stop) {
+      console.error(stop.error);
+      if (stop.suggestions?.length) console.error("Did you mean:", stop.suggestions.join(", "));
+      process.exit(1);
+    }
+    vias.push(stop);
+  }
 
-  const modes: SkillMode[] = modeArg ? [modeArg] : TIME_MODES;
-  const unknown = modes.find((id) => !SKILL_MODES.includes(id));
+  const modes: ModeId[] = modeArg ? [modeArg] : TIME_MODES;
+  const unknown = modes.find((id) => !(id in MODES));
   if (unknown) {
     console.error(`Unknown mode "${unknown}". Use walk, bike, bus, or accessible.`);
     process.exit(1);
   }
 
-  const { plans: ok, failed } = compareModes({ graph, transit }, from.endpoint, to.endpoint, modes);
+  const compared = modes.map((id) => {
+    const spec = MODES[id];
+    const hops = [from, ...vias, to];
+    const parts = [];
+    for (let i = 0; i < hops.length - 1; i++) {
+      const plan = planRoute(graph, hops[i].endpoint, hops[i + 1].endpoint, {
+        profile: spec.profile,
+        transit: spec.transit ? transit : null,
+        walkWeight: 1,
+        departAt: new Date(),
+      });
+      if (!plan.ok) return { id, label: spec.label, plan };
+      parts.push(plan.route);
+    }
+    const route = joinRoutes(parts);
+    return { id, label: spec.label, plan: { ok: true as const, route, connectors: [] } };
+  });
+
+  const ok = compared.filter((c) => c.plan.ok);
+  const failed = compared.filter((c) => !c.plan.ok);
   if (ok.length === 0) {
-    const reasons = failed.map((c) => `${MODES[c.mode].label}: ${c.error}`).join("\n");
+    const reasons = failed.map((c) => `${c.label}: ${c.plan.ok ? "" : c.plan.error}`).join("\n");
     console.error(`No route from ${from.matched} to ${to.matched}.\n${reasons}`);
     process.exit(1);
   }
 
+  ok.sort((a, b) => (a.plan.ok ? a.plan.route.seconds : Infinity) - (b.plan.ok ? b.plan.route.seconds : Infinity));
   const best = ok[0];
-  const { route } = best.planned;
+  if (!best.plan.ok) process.exit(1);
+  const { route } = best.plan;
   const leaving = from.endpoint.kind === "building" ? from.endpoint.building : from.endpoint.kind === "point" ? from.endpoint.building : undefined;
   const steps = buildSteps(graph, route, to.matched, { leaving });
 
   const payload = {
     from: from.matched,
+    via: vias.map((stop) => stop.matched),
     to: to.matched,
     best: {
-      mode: MODES[best.mode].label,
+      mode: best.label,
       minutes: route.minutes,
       seconds: route.seconds,
       meters: route.meters,
@@ -188,10 +249,11 @@ async function main() {
       leaveAt: route.leaveAt.toISOString(),
       arriveAt: route.arriveAt.toISOString(),
     },
-    compared: [
-      ...ok.map((c) => ({ mode: MODES[c.mode].label, minutes: c.planned.route.minutes, seconds: c.planned.route.seconds, meters: c.planned.route.meters })),
-      ...failed.map((c) => ({ mode: MODES[c.mode].label, error: c.error })),
-    ],
+    compared: compared.map((c) =>
+      c.plan.ok
+        ? { mode: c.label, minutes: c.plan.route.minutes, seconds: c.plan.route.seconds, meters: c.plan.route.meters }
+        : { mode: c.label, error: c.plan.error },
+    ),
     steps: steps.map((s) => ({ text: s.text, meters: Math.round(s.distance) })),
   };
 
@@ -200,16 +262,21 @@ async function main() {
     return;
   }
 
-  console.log(`Fastest: ${MODES[best.mode].label} · ${fmtMin(route.seconds)} · ${fmtMeters(route.meters)}`);
+  console.log(`Fastest: ${best.label} · ${fmtMin(route.seconds)} · ${fmtMeters(route.meters)}`);
   console.log(`From: ${from.matched}`);
+  if (vias.length) console.log(`Via:  ${vias.map((stop) => stop.matched).join(" → ")}`);
   console.log(`To:   ${to.matched}`);
-  if (modes.length > 1) {
+  if (ok.length > 1) {
     console.log("Compared:");
     for (const c of ok) {
-      const mark = c.mode === best.mode ? " ← fastest" : "";
-      console.log(`  ${MODES[c.mode].label}: ${fmtMin(c.planned.route.seconds)} (${fmtMeters(c.planned.route.meters)})${mark}`);
+      if (!c.plan.ok) continue;
+      const mark = c.id === best.id ? " ← fastest" : "";
+      console.log(`  ${c.label}: ${fmtMin(c.plan.route.seconds)} (${fmtMeters(c.plan.route.meters)})${mark}`);
     }
-    for (const c of failed) console.log(`  ${MODES[c.mode].label}: ${c.error}`);
+    for (const c of failed) {
+      if (c.plan.ok) continue;
+      console.log(`  ${c.label}: ${c.plan.error}`);
+    }
   }
   console.log("Directions:");
   for (const step of steps) {
