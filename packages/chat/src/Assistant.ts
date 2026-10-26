@@ -120,6 +120,8 @@ export class Assistant {
   /** Coordinates of the route just planned, so a class-plus-food question can list halls on the way. */
   private lastCoords: LngLat[] | null = null;
   private last: Intent | null = null;
+  /** Names already shown, so "something else" can skip them. */
+  private offered: string[] = [];
   private readonly memory: Memory;
   /** The last reply asked "where are you?": this runs once it's answered. */
   private pending: ((at: Place) => Promise<Reply>) | null = null;
@@ -150,6 +152,7 @@ export class Assistant {
     const intent = await this.model.read(message, this.last, this.memory.facts);
     console.info("[chat]", this.model.name, intent);
     this.last = intent;
+    if (!intent.again) this.offered = [];
     const noted = this.keep(intent);
     if (intent.mode && intent.action !== "stop") this.explicit = intent.mode;
     else if (intent.action === "class" || intent.action === "route" || intent.action === "nearby" || intent.action === "next" || intent.action === "order") this.explicit = null;
@@ -183,8 +186,10 @@ export class Assistant {
 
     switch (intent.action) {
       case "class":
+        if (this.rejected(intent)) return finish({ text: `Not ${intent.avoid ?? intent.course ?? "that class"}. Which class instead?` });
         return Promise.resolve(this.toClass(intent)).then((reply) => this.withFood(intent, reply)).then(finish);
       case "next":
+        if (intent.again) return finish({ text: "Not that class. Name the course, or tell me what you want instead." });
         return Promise.resolve(this.nextClass()).then((reply) => this.withFood(intent, reply)).then(finish);
       case "add":
         return Promise.resolve(this.addCourse(intent.course)).then(finish);
@@ -195,11 +200,13 @@ export class Assistant {
       case "day":
         return Promise.resolve(this.dayPlan(intent.day)).then(finish);
       case "route":
+        if (intent.again && this.rejected(intent)) return finish({ text: `Not ${intent.place ?? intent.avoid ?? "that"}. Where to instead?` });
         if (intent.place || intent.to) return Promise.resolve(this.toPlace(intent.place ?? intent.to!, this.target(intent), intent.via)).then(finish);
         break;
       case "nearby":
-        return this.nearby(intent.what ?? message, intent.place).then(finish);
+        return this.nearby(intent.what ?? message, intent.place, intent).then(finish);
       case "stop":
+        if (intent.again) return finish({ text: `Not ${intent.place ?? "that stop"}. Which stop instead?` });
         return this.stopTimes(intent.place).then(finish);
       case "order":
         return this.orderFood(intent, message).then(finish);
@@ -453,8 +460,29 @@ export class Assistant {
     return this.go();
   }
 
+  /** True when they threw out this destination, course, or the whole last answer. */
+  private rejected(intent: Intent): boolean {
+    if (!intent.again) return false;
+    if (!intent.avoid) return true;
+    const avoid = intent.avoid.toLowerCase();
+    const named = `${intent.place ?? ""} ${intent.to ?? ""} ${intent.course ?? ""} ${intent.what ?? ""} ${intent.item ?? ""}`.toLowerCase();
+    return named.includes(avoid);
+  }
+
+  /** A result already shown, or the thing they just said they don't want. */
+  private blocked(name: string, intent?: Intent): boolean {
+    const n = name.toLowerCase();
+    if (intent?.avoid && n.includes(intent.avoid.toLowerCase())) return true;
+    return !!intent?.again && this.offered.some((shown) => shown.toLowerCase() === n);
+  }
+
+  private noteOffered(names: string[]): void {
+    const seen = new Set(this.offered.map((name) => name.toLowerCase()));
+    for (const name of names) if (!seen.has(name.toLowerCase())) this.offered.push(name);
+  }
+
   /** The nearest restroom, water, coffee… to you (or to the place named), and the way there. */
-  private async nearby(what: string, near: string | undefined): Promise<Reply> {
+  private async nearby(what: string, near: string | undefined, intent?: Intent): Promise<Reply> {
     const kind = nearbyKind(what);
     if (!kind) return { text: `I don't know where to find "${what}" yet. Try restrooms, water, coffee, food, printers, parking, bike racks or ATMs.` };
     let center: LngLat | null = null;
@@ -469,9 +497,13 @@ export class Assistant {
       center = start ? endpointPosition(start.endpoint) : null;
       if (start) around = start.label;
     }
-    if (!center) return this.askWhere(`Where are you? I'll find the nearest ${kind.label}.`, () => this.nearby(what, near));
-    const found = nearest(this.campus.mapPoints, kind, center, 3);
-    if (!found.length) return { text: `The campus map has no ${kind.label}s.` };
+    if (!center) return this.askWhere(`Where are you? I'll find the nearest ${kind.label}.`, () => this.nearby(what, near, intent));
+    if (intent?.avoid && (kind.id === intent.avoid.toLowerCase() || kind.words.test(intent.avoid))) {
+      return { text: `Not ${kind.label}. What do you want instead?` };
+    }
+    const found = nearest(this.campus.mapPoints, kind, center, 12).filter((point) => !this.blocked(point.name, intent)).slice(0, 3);
+    if (!found.length) return { text: `Not ${intent?.avoid ?? "that"}. What do you want instead?` };
+    this.noteOffered(found.map((point) => point.name));
     this.view.markers(
       found.map((p) => ({ lngLat: p.lngLat, label: p.name })),
       kind.category,
@@ -546,14 +578,21 @@ export class Assistant {
   private async orderFromMenus(intent: Intent, message: string, menus: ScrapedMenus, status?: string): Promise<Reply> {
     const namedHall = intent.place ? resolveHall(intent.place) : undefined;
     const hall = intent.along ? namedHall : (namedHall ?? resolveHall(message));
+    const droppedItem = intent.avoid && intent.item?.toLowerCase().includes(intent.avoid.toLowerCase());
     const ask = {
       hall,
-      item: intent.item,
+      item: droppedItem ? undefined : intent.item,
       minPrice: intent.minPrice,
       maxPrice: intent.maxPrice,
       maxInclusive: intent.maxInclusive,
     };
-    const picks = recommend(menus, { ...ask, perHall: intent.along ? 8 : undefined }, intent.along ? 200 : 12);
+    let picks = recommend(menus, { ...ask, perHall: intent.along ? 8 : undefined }, intent.along ? 200 : 12);
+    if (intent.avoid || intent.again) {
+      picks = picks.filter((pick) => !this.blocked(pick.name, intent) && !this.blocked(pick.hall, intent));
+    }
+    if (!picks.length && (intent.again || intent.avoid)) {
+      return { text: `Not ${intent.avoid ?? "that"}. What do you want instead?` };
+    }
     if (intent.along && intent.to) return this.foodAlong(intent, menus, picks, status);
     if (!picks.length) {
       const range = pricePhrase(intent.minPrice, intent.maxPrice);
@@ -573,6 +612,7 @@ export class Assistant {
     const chosen = this.closestHall(picks, from);
     const here = picks.filter((p) => p.hall === chosen);
     const shown = (here.length ? here : picks).slice(0, 4);
+    this.noteOffered(shown.map((pick) => pick.name));
     const elsewhere = [...new Set(picks.filter((p) => p.hall !== chosen).map((p) => p.hall))];
     let bill = this.foodBill(shown, intent, chosen);
     if (elsewhere.length) bill += `\nAlso in range: ${elsewhere.slice(0, 3).join(", ")}.`;
@@ -616,6 +656,7 @@ export class Assistant {
     const close = near.filter((hall) => hall.meters <= 280);
     const keep = new Set((close.length ? close : near.slice(0, 1)).map((hall) => hall.name));
     const shown = picks.filter((pick) => keep.has(pick.hall)).slice(0, 6);
+    this.noteOffered(shown.map((pick) => pick.name));
     const range = pricePhrase(intent.minPrice, intent.maxPrice);
     let bill: string;
     if (!shown.length) {

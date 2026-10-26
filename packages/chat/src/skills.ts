@@ -27,6 +27,9 @@ add / drop / what are my classes / what do I have tomorrow: classes (action add,
 by bike instead / I'm at Price Center / same place: only change that slot on the previous request.
 I usually bike / I use a wheelchair: remember. One-off trips are not remembered.
 help / hey / thanks: say. A long line with no place, class, food, or amenity: say.
+not coffee / not that / something else / anything but a burrito / I want something else / try again / none of those: change the last request. Leave that thing out and answer again. Do not repeat it. No earlier request: ask what to change.
+Gisewel is Geisel. A close place spelling, same first letter, is still that place. heard shows the fix. Do not "fix" a real word.
+giberish with no campus word: say there is no way to understand. Do not guess a place.
 hit up / how far / close / then / via: campus-talk. Last place is to; earlier stops are via.`,
   },
   {

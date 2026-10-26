@@ -47,6 +47,8 @@ Show `heard` when a real word was corrected, so a typo is visible.
 | `why is the bus always late` | other + reply | No live delays. The next scheduled bus is the offer. |
 | `i'm lost`, `what time is it`, `who are you`, `tell me a joke`, `this is stupid`, `talk to me` | other + reply | The reply answers that line. Instant. |
 | `help`, `hey`, `asdf`, `thanks` | other + reply | Instant. Do not wait on a model. |
+| `not coffee`, `not that`, `something else`, `anything but a burrito`, `I want something else`, `try again`, `none of those` | change the last request | Drop the thing they named (`avoid`) and answer the same request again. Do not repeat it. No earlier request: ask what to change. |
+| `giberish giberish fheirfhoferhfieh` | other + reply | No campus word in the line. Say there is no way to understand. Do not guess a place. |
 | A long line with no place, class, food, or amenity | other, no reply | `needsModel` may ask a connected model. If that fails, answer the line and say what the chat can do. |
 
 A place the search misses gets up to four "did you mean" choices, not a dead end.
@@ -57,7 +59,7 @@ While the chat is asking "where are you?", a short place (`Geisel`, `Price Cente
 
 Quiet fixes stay invisible: `gonna`, `im`, `whats`, `mins`, `tmrw`, `pc` (Price Center), `u`, `2` used as "to".
 
-Loud fixes set `heard`: place and verb typos (`geisle`, `mur`, `goign`, `bathrom`, `hw`, `gt`) plus a one-edit fuzzy match against campus words. Do not fuzzy a word that is already a real word (`anything`, `math`, `degrees`, course subjects).
+Loud fixes set `heard`: place and verb typos (`geisle`, `mur`, `goign`, `bathrom`, `hw`, `gt`) plus a one-edit fuzzy match against campus words. A place can be a few edits off when it still starts with the same letter and nothing else is as close: `Gisewel` is Geisel. Do not fuzzy a word that is already a real word (`anything`, `math`, `degrees`, `else`, course subjects). Nonsense that matches no place stays nonsense.
 
 ## When you add a shape
 

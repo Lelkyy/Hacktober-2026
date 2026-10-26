@@ -206,9 +206,59 @@ function fixWord(word: string, mark: () => void): string {
       ties = 1;
     } else if (distance === bestD && candidate !== best) ties += 1;
   }
-  if (ties !== 1 || !best || best === word) return word;
+  if (ties !== 1 || !best || best === word) {
+    const place = guessPlace(word);
+    if (!place) return word;
+    mark();
+    return place;
+  }
   mark();
   return best;
+}
+
+/** Place names a few edits can still mean. Not ordinary words like "where" or "class". */
+const PLACES = [
+  "geisel", "library", "muir", "pines", "ventanas", "gilman", "pepper", "canyon", "warren",
+  "rimac", "foodworx", "oceanview", "revelle", "marshall", "bistro",
+];
+
+/**
+ * "Gisewel" is three edits from Geisel, past the one-edit fix above.
+ * Only a unique place, sharing the first letter, and only when the word is not already English.
+ */
+function guessPlace(word: string): string | undefined {
+  if (word.length < 6) return undefined;
+  let best = "";
+  let bestD = 4;
+  let ties = 0;
+  for (const candidate of PLACES) {
+    if (candidate[0] !== word[0] || Math.abs(candidate.length - word.length) > 2) continue;
+    const distance = damerau(word, candidate, 3);
+    if (distance === 0 || distance > 3) continue;
+    if (distance < bestD) {
+      best = candidate;
+      bestD = distance;
+      ties = 1;
+    } else if (distance === bestD && candidate !== best) ties += 1;
+  }
+  return ties === 1 && best ? best : undefined;
+}
+
+const SMALL = new Set(["the", "and", "for", "you", "are", "was", "but", "not", "can", "its", "too", "out", "all", "any", "our", "who", "why", "how", "yes", "she", "him", "her", "them", "they", "this", "that", "with", "have", "just"]);
+
+/** A word the parser already treats as English or as a campus word. */
+function knownWord(word: string): boolean {
+  if (word.length <= 3) return true;
+  return PROTECT.has(word) || SMALL.has(word) || !!LOUD[word] || /^\d+$/.test(word);
+}
+
+/**
+ * Every longer word is nonsense ("giberish fheirfhoferhfieh").
+ * A line that still has a real word, or a place we could estimate, is not gibberish.
+ */
+export function isGibberish(text: string): boolean {
+  const words = text.toLowerCase().replace(/[^a-z0-9'\s]/g, " ").split(/\s+/).filter((word) => word.length >= 4);
+  return words.length > 0 && words.every((word) => !knownWord(word));
 }
 
 /** Edit distance with adjacent transpositions counted as one. Stops past `max`. */

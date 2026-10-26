@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatModel } from "./ChatModel.ts";
-import { isLocalSure, needsModel, parseLocally } from "./intent.ts";
+import { carryOver, isLocalSure, needsModel, parseLocally } from "./intent.ts";
 
 const course = (code: string) => code === "MATH 20C" || code === "CSE 12";
 
@@ -179,6 +179,41 @@ describe("messy chat lines", () => {
     });
     expect(needsModel("swing by pines then geisel", parseLocally("swing by pines then geisel", () => false))).toBe(false);
     expect(needsModel("how far is pines", parseLocally("how far is pines", () => false))).toBe(false);
+  });
+
+  it("estimates a place a few letters off, and refuses nonsense", () => {
+    const guessed = parseLocally("Gisewel", () => false);
+    expect(guessed).toMatchObject({ action: "route", place: "geisel" });
+    expect(guessed.heard).toMatch(/geisel/);
+    expect(needsModel("Gisewel", guessed)).toBe(false);
+    const junk = parseLocally("giberish giberish fheirfhoferhfieh", () => false);
+    expect(junk.action).toBe("other");
+    expect(junk.reply).toMatch(/No way to understand/);
+    expect(junk.place).toBeUndefined();
+    expect(needsModel("giberish giberish fheirfhoferhfieh", junk)).toBe(false);
+    expect(parseLocally("else", () => false).place).not.toBe("geisel");
+  });
+
+  it("changes the last request when they reject it", () => {
+    const coffee = parseLocally("not coffe", () => false);
+    expect(coffee).toMatchObject({ action: "change", again: true, avoid: "coffee" });
+    expect(coffee.heard).toMatch(/coffee/);
+    const previous = parseLocally("coffee at geisel", () => false);
+    const changed = carryOver(coffee, previous, "not coffe");
+    expect(changed).toMatchObject({ action: "nearby", what: "coffee", place: "geisel", again: true, avoid: "coffee" });
+    expect(needsModel("not coffe", changed)).toBe(false);
+
+    const elsewise = carryOver(parseLocally("i want something else", () => false), previous, "i want something else");
+    expect(elsewise).toMatchObject({ action: "nearby", what: "coffee", again: true });
+    expect(elsewise.avoid).toBeUndefined();
+
+    for (const line of ["not that", "anything but coffee", "try again", "none of those", "show me something else"]) {
+      expect(parseLocally(line, () => false).again).toBe(true);
+    }
+    expect(carryOver(parseLocally("something else", () => false), null, "something else").reply).toMatch(/what to change/);
+    expect(parseLocally("nah forget geisel i wanna go to rimac actually", () => false).place).toBe("rimac");
+    expect(parseLocally("bathroom not far from pines", () => false)).toMatchObject({ action: "nearby", what: "restroom", place: "pines" });
+    expect(parseLocally("i'm not taking phys 2a anymore", (code) => code === "PHYS 2A")).toMatchObject({ action: "drop", course: "PHYS 2A" });
   });
 });
 
