@@ -13,10 +13,12 @@ import {
   type TransitNetwork,
 } from "@campus/core";
 
-/** The ways the skill compares. Scooters need the live Spin feed, so they aren't here. */
+/** Ways a person can name. The default trip is only walk and transit. */
 export type SkillMode = "walk" | "accessible" | "bike" | "bus";
 
 export const SKILL_MODES: SkillMode[] = ["walk", "accessible", "bike", "bus"];
+/** No mode named: walk or transit, whichever is faster. */
+export const DEFAULT_MODES: SkillMode[] = ["walk", "bus"];
 
 /** What routing needs: the path graph and the bus and trolley timetables. */
 export interface RouterData {
@@ -63,7 +65,7 @@ export function compareModes(
   data: RouterData,
   from: Endpoint,
   to: Endpoint,
-  modes: SkillMode[] = SKILL_MODES,
+  modes: SkillMode[] = DEFAULT_MODES,
   arriveBy?: Date,
 ): Compared {
   const plans: ModePlan[] = [];

@@ -27,7 +27,7 @@ npx tsx .cursor/skills/shortest-route/scripts/shortest-route.ts --from "<origin>
 
 Repeat `--via "<stop>"` for extra places, in the order they named them (`then` / `via` / `through`). Path hop by hop. Do not skip a named stop.
 
-Pass `--json` when you need structured output. Pass `--mode walk|bike|bus|accessible` only when they asked for that mode. Default compares Walk, Bike, and Transit and picks the **shortest door-to-door time** (`walkWeight: 1`).
+Pass `--json` when you need structured output. Pass `--mode walk|bike|scooter|bus|accessible` only when they asked for that mode (Spin bike or scooter is `scooter`, transit is `bus`). Default compares Walk and Transit and picks whichever is faster (`walkWeight: 1`). Do not add bike or Spin unless they asked.
 
 4. **Reply** with the `campus-answer` skill: fastest mode, minutes, distance, the comparison, and the turn-by-turn list. Mention stairs if the fastest walk uses them; offer `--mode accessible` if they need no stairs. The app uses the same slots through `integrateIntent` and `TripPlanner.compare`.
 
@@ -50,5 +50,5 @@ User: "Price Center then Geisel then WLH"
 
 - Coordinates are WGS84. People say **lat,lng**; the graph stores **[lng, lat]**. The script accepts either order if one value is clearly a longitude.
 - Search is typo-tolerant (`geisle` → Geisel Library). If the script prints "Did you mean", confirm before routing.
-- Scooter trips need the live Spin feed; skip unless they asked for a scooter and that data is available in the app.
+- A Spin bike or scooter is `--mode scooter`, and only when they asked. The app uses the live Spin feed for that ride.
 - If the script fails (off the mapped network, shuttle-only building), quote its error. Do not sketch a fake path.

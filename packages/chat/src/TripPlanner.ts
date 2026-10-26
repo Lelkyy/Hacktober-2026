@@ -12,8 +12,8 @@ export interface ModePlan {
   planned: Extract<Planned, { ok: true }>;
 }
 
-/** Walk, bike, step-free, and transit. The fastest is first. */
-const COMPARE: TravelMode[] = ["walk", "bike", "bus", "accessible"];
+/** Asked for nothing: walk and transit. Whichever is faster comes first. */
+const DEFAULT_MODES: TravelMode[] = ["walk", "bus"];
 
 /** Join hop-by-hop routes. Do not skip a named stop. */
 export function stitchRoutes(parts: Route[]): Route {
@@ -58,14 +58,15 @@ export class TripPlanner {
   }
 
   /**
-   * Every way that works, fastest first. A transit option that is really just walking
-   * is left out, because the walk is already listed.
+   * Walk and transit, fastest first, plus `asked` when they named a way (bike, Spin, no stairs).
+   * A transit option that is really just walking is left out, because the walk is already listed.
    */
-  compare(from: Endpoint, to: Endpoint, arriveBy?: Date, via: Endpoint[] = []): ModePlan[] {
-    const key = `${endpointKey(from)}>${via.map(endpointKey).join(">")}${via.length ? ">" : ""}${endpointKey(to)}@${arriveBy ? Math.floor(arriveBy.getTime() / 60_000) : ""}`;
+  compare(from: Endpoint, to: Endpoint, arriveBy?: Date, via: Endpoint[] = [], asked?: TravelMode): ModePlan[] {
+    const modes = asked && !DEFAULT_MODES.includes(asked) ? [...DEFAULT_MODES, asked] : DEFAULT_MODES;
+    const key = `${endpointKey(from)}>${via.map(endpointKey).join(">")}${via.length ? ">" : ""}${endpointKey(to)}@${arriveBy ? Math.floor(arriveBy.getTime() / 60_000) : ""}#${modes.join(",")}`;
     if (this.cached?.key === key) return this.cached.plans;
     const plans: ModePlan[] = [];
-    for (const mode of COMPARE) {
+    for (const mode of modes) {
       const planned = this.plan(from, to, mode, arriveBy, via);
       if (!planned.ok || (mode === "bus" && planned.walkInstead)) continue;
       plans.push({ mode, planned });

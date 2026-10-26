@@ -24,7 +24,7 @@ Class plus food ("math 20c in 30 and i'm hungry"): classes, along true.
 heading toward Geisel i'm starving / anything under $10 on the way to Muir: food, along true. A dining hall as the destination is place, not to.
 "under 10" is maxPrice 10, exclusive, not a dish and not a time.
 add / drop / what are my classes / what do I have tomorrow: classes (action add, drop, classes, or day).
-by bike instead / I'm at Price Center / same place: only change that slot on the previous request.
+by bike instead / by transit / spin bike / no stairs: set that mode and use it. I'm at Price Center / same place: only change that slot on the previous request. No mode named: the app picks the faster of walk or transit.
 I usually bike / I use a wheelchair: remember. One-off trips are not remembered.
 help / hey / thanks: say. A long line with no place, class, food, or amenity: say.
 not coffee / not that / something else / anything but a burrito / I want something else / try again / none of those: change the last request. Leave that thing out and answer again. Do not repeat it. No earlier request: ask what to change.
@@ -49,7 +49,7 @@ Wait times are not on the menu. A Triton2Go clock is when the kitchen may see th
     name: "shortest-route",
     when: "They want to get somewhere, including a class or a dining hall as the dest.",
     body: `Set to (building, room like WLH 2001, or a place). Set from only if they named a start or gave coordinates. Do not guess a start; the app will ask.
-mode is walk, bike, bus, or accessible only if they asked. Leave mode out to pick the shortest door-to-door time.
+mode is walk, bike, scooter (Spin bike or scooter), bus (transit), or accessible only if they asked. Leave mode out and the app takes whichever is faster, walk or transit.
 via is extra stops before to, in the order they said ("Geisel then Pines" → via Geisel, to Pines; "to Geisel via Pines" → via Pines, to Geisel). Path every named stop. Do not skip one.
 No stairs / wheelchair / step-free is accessible.
 People say lat,lng. A follow-up only changes the last trip.

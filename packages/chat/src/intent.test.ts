@@ -214,6 +214,12 @@ describe("messy chat lines", () => {
     expect(parseLocally("nah forget geisel i wanna go to rimac actually", () => false).place).toBe("rimac");
     expect(parseLocally("bathroom not far from pines", () => false)).toMatchObject({ action: "nearby", what: "restroom", place: "pines" });
     expect(parseLocally("i'm not taking phys 2a anymore", (code) => code === "PHYS 2A")).toMatchObject({ action: "drop", course: "PHYS 2A" });
+    expect(parseLocally("spin bike to geisel", () => false)).toMatchObject({ action: "route", place: "geisel", mode: "scooter" });
+    expect(parseLocally("take transit to price center", () => false)).toMatchObject({ action: "route", place: "price center", mode: "bus" });
+    expect(parseLocally("bike to geisel", () => false)).toMatchObject({ action: "route", place: "geisel", mode: "bike" });
+    expect(parseLocally("nearest spin bike", () => false)).toMatchObject({ action: "nearby", what: "spin" });
+    expect(parseLocally("nearest spin bike", () => false).mode).toBeUndefined();
+    expect(parseLocally("geisel", () => false).mode).toBeUndefined();
   });
 });
 

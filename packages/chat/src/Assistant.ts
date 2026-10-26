@@ -644,6 +644,7 @@ export class Assistant {
       dest.endpoint,
       undefined,
       via.map((stop) => stop.endpoint),
+      this.explicit ?? undefined,
     );
     const wanted = this.explicit ? options.find((o) => o.mode === this.explicit) : undefined;
     let coordinates = (wanted ?? options[0])?.planned.route.coordinates;
@@ -840,7 +841,7 @@ export class Assistant {
     const from = await this.start();
     if (!from) return this.askWhere(`${trip.title}. Where are you starting from?`, () => this.go());
     const via = (trip.via ?? []).map((stop) => stop.endpoint);
-    const options = this.planner.compare(from.endpoint, trip.to.endpoint, trip.arriveBy ?? undefined, via);
+    const options = this.planner.compare(from.endpoint, trip.to.endpoint, trip.arriveBy ?? undefined, via, this.explicit ?? undefined);
     const wanted = this.explicit ? options.find((o) => o.mode === this.explicit) : undefined;
     const picked = wanted ?? options[0];
     if (!picked) {

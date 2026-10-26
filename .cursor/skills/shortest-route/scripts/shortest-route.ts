@@ -32,7 +32,7 @@ import {
   type TransitData,
 } from "@campus/core";
 
-const TIME_MODES: ModeId[] = ["walk", "bike", "bus"];
+const TIME_MODES: ModeId[] = ["walk", "bus"];
 const DATA = resolve(repoRoot(), "apps/web/public/data");
 
 function repoRoot(): string {
@@ -156,9 +156,9 @@ async function main() {
   if (!fromRaw || !toRaw || hasFlag("--help")) {
     console.error(
       [
-        "Usage: npx tsx .cursor/skills/shortest-route/scripts/shortest-route.ts --from <here|name|lat,lng> --to <name|lat,lng> [--via <name>]… [--mode walk|bike|bus|accessible] [--json]",
+        "Usage: npx tsx .cursor/skills/shortest-route/scripts/shortest-route.ts --from <here|name|lat,lng> --to <name|lat,lng> [--via <name>]… [--mode walk|bike|scooter|bus|accessible] [--json]",
         "",
-        "Default: compare Walk, Bike, and Transit and pick the shortest door-to-door time.",
+        "Default: compare Walk and Transit and pick whichever is faster.",
         "Repeat --via for extra stops, in the order they named them.",
       ].join("\n"),
     );
@@ -198,7 +198,7 @@ async function main() {
   const modes: ModeId[] = modeArg ? [modeArg] : TIME_MODES;
   const unknown = modes.find((id) => !(id in MODES));
   if (unknown) {
-    console.error(`Unknown mode "${unknown}". Use walk, bike, bus, or accessible.`);
+    console.error(`Unknown mode "${unknown}". Use walk, bike, scooter, bus, or accessible.`);
     process.exit(1);
   }
 

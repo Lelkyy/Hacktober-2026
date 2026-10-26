@@ -71,9 +71,9 @@ export interface Intent {
   remember?: string[];
 }
 
-export type TravelMode = Extract<ModeId, "walk" | "accessible" | "bike" | "bus">;
+export type TravelMode = Extract<ModeId, "walk" | "accessible" | "bike" | "scooter" | "bus">;
 
-export const TRAVEL_MODES: TravelMode[] = ["walk", "accessible", "bike", "bus"];
+export const TRAVEL_MODES: TravelMode[] = ["walk", "accessible", "bike", "scooter", "bus"];
 
 const ACTIONS = ["class", "route", "nearby", "stop", "next", "add", "drop", "classes", "day", "change", "order", "other"];
 
@@ -126,7 +126,7 @@ Only copy what the message says; never invent rooms, buildings or times. Leave o
 - action "order": they ask what food costs, what to eat, or for dishes in a budget ("what's good under $10", "a burrito at 64 Degrees", "anything under $10 on the way to Muir"). place = a dining hall only when they want that hall. item = the dish if said; omit it when they just want food. quantity = how many. minPrice and maxPrice are dollars ("under 10" or "under 10$" -> maxPrice 10, "between 5 and 12" -> minPrice 5, maxPrice 12, "cheap" -> maxPrice 10). to = where the trip is going, when they also want food. along = true when the food should be near that route. Fix typos in place names ("mur" -> "Muir").
 - action "other": anything else; put a one-sentence friendly reply in "reply" saying what you can do (directions to classes and campus places, the nearest restroom/water/food, bus times, dining recommendations in a price range).
 - from: where they start ("from Geisel", "I'm at Price Center" -> "Price Center").
-- mode: walk, accessible (no stairs, wheelchair), bike, bus (bus, shuttle, trolley, transit).
+- mode: walk, accessible (no stairs, wheelchair), bike, scooter (Spin bike or scooter), bus (bus, shuttle, trolley, transit). Set it only when they asked. Left out, the app picks whichever is faster, walk or transit.
 - inMinutes: "in 30 minutes" -> 30, "in an hour" -> 60, "in half an hour" -> 30.
 - at: a clock time in 24h "HH:MM"; "at 3" or "at 3pm" -> "15:00", "at noon" -> "12:00".
 - day: "today", "tomorrow" or a weekday name, if said.
@@ -312,8 +312,11 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
     }
   }
 
+  const spinWord = /\b(?:spin(?:\s+(?:e-?)?bikes?|\s+scooters?)?|e-?bikes?|scooters?)\b/.test(text);
+  const spinPlace = /\b(?:nearest|closest|where|find|hub|rack|lock)\b/.test(text);
   if (/\b(no stairs|wheelchair|accessible|step-free|elevator)\b/.test(text)) intent.mode = "accessible";
-  else if (/\b(bike|biking|bicycle|cycle|cycling|ride my bike)\b/.test(text) && !/\b(bike racks?|bicycle racks?|lock (?:my |the )?bike)\b/.test(text)) intent.mode = "bike";
+  else if (spinWord && !spinPlace) intent.mode = "scooter";
+  else if (!spinWord && /\b(bike|biking|bicycle|cycle|cycling|ride my bike)\b/.test(text) && !/\b(bike racks?|bicycle racks?|lock (?:my |the )?bike)\b/.test(text)) intent.mode = "bike";
   else if (/\b(bus|buses|shuttle|trolley|transit)\b/.test(text)) intent.mode = "bus";
   else if (/\b(walk|walking|on foot)\b/.test(text)) intent.mode = "walk";
 

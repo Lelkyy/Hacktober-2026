@@ -40,6 +40,7 @@ Show `heard` when a real word was corrected, so a typo is visible.
 | `burrito at 64 degrees under 12` | order | `under` is exclusive. Not a dish named "under". |
 | `what's good under $10` | order | No hall yet: closest open hall once we know where they are. |
 | `add CSE 12`, `drop CSE 12`, `what are my classes`, `what do I have tomorrow` | add / drop / classes / day | |
+| `by bike instead`, `take transit`, `spin bike to Geisel`, `no stairs` | that mode | Use the way they named. Spin is a scooter, not a regular bike. They didn't name one: walk or transit, whichever is faster. |
 | `by bike instead`, `I'm at Price Center`, `same place` | change | Keeps the last trip. No trip yet: remember the start and ask where to. |
 | `I usually bike`, `I use a wheelchair` | remember | One-off trips are not remembered. |
 | `where tf is geisel`, `i gotta piss`, `gimme a burrito im broke`, `im at sixth, get me to geisel but im hungry` | route / nearby / order | Filler and slang come off. The place, amenity, or food is the request. |

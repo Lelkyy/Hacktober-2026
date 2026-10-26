@@ -21,7 +21,7 @@ export const AGENT_SCHEMA = {
     item: { type: "string" },
     course: { type: "string" },
     what: { type: "string" },
-    mode: { type: "string", enum: ["walk", "accessible", "bike", "bus"] },
+    mode: { type: "string", enum: ["walk", "accessible", "bike", "scooter", "bus"] },
     maxPrice: { type: "number" },
     minPrice: { type: "number" },
     maxInclusive: { type: "boolean" },
@@ -50,7 +50,7 @@ export function agentPrompt(now: Date, facts: string[], message = "", local?: In
   const known = facts.length ? ` Remembered, unless this message says otherwise: ${facts.join("; ")}.` : "";
   return `It is ${when}. Call one campus tool. Return one JSON object and nothing else.${known}
 tool is trip, food, nearby, classes, stop, or say.
-trip: going somewhere, including to a class ("math 20C in 30 minutes" is a trip, with course and inMinutes). to, from, via (extra stops before to, in order), mode (walk, bike, bus, or accessible), course, meeting, inMinutes, at (HH:MM), day.
+trip: going somewhere, including to a class ("math 20C in 30 minutes" is a trip, with course and inMinutes). to, from, via (extra stops before to, in order), mode only when they named one (walk, bike, scooter for a Spin bike, bus for transit, or accessible), course, meeting, inMinutes, at (HH:MM), day. Leave mode out to let the app pick the faster of walk or transit.
 food: a dish, a price, or food on the way. item is the dish only. maxPrice, minPrice, quantity, place (a dining hall only), to (where they are going), from, along true when the food should be near the route. "under 10" is maxPrice 10, not a dish and not a time.
 nearby: the closest restroom, water, coffee, food, printer, parking, bike rack, or ATM. what, place.
 classes: their schedule. action is next, add, drop, classes, or day. course, day.
