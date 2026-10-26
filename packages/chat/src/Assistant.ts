@@ -23,7 +23,8 @@ import type { Intent, TravelMode } from "./intent.ts";
 import type { Location } from "./Location.ts";
 import { explainStatus, findItems, hallNamed, loadMenu, money, prepMinutes, quote } from "./dining.ts";
 import { placesFor, tenderPlaces, type Tender } from "./payment.ts";
-import { HALL_PLACE, pricePhrase, recommend, resolveHall, type FoodPick, type ScrapedMenus } from "./menus.ts";
+import { answerFood, factCard, formatQuestion, pickHall, usableReply, whereTo, type FoodAnswer } from "./agent.ts";
+import { budgetOf, dishOf, HALL_PLACE, pricePhrase, recommend, resolveHall, type FoodPick, type ScrapedMenus } from "./menus.ts";
 import { loadMemory, noteFact, saveMemory, type Memory } from "./memory.ts";
 import { nearbyKind, nearest } from "./nearby.ts";
 import { groupOf, nearestStop, stopNamed, stopSummary } from "./stops.ts";
@@ -115,6 +116,8 @@ export class Assistant {
   private explicit: TravelMode | null = null;
   private trip: Trip | null = null;
   private last: Intent | null = null;
+  /** The last place this chat showed, so "is it actually under $10?" can check that place. */
+  private lastPlace: string | null = null;
   private readonly memory: Memory;
   /** The last reply asked "where are you?": this runs once it's answered. */
   private pending: ((at: Place) => Promise<Reply>) | null = null;
@@ -139,7 +142,12 @@ export class Assistant {
   }
 
   async handle(message: string): Promise<Reply> {
-    const intent = await this.model.read(message, this.last, this.memory.facts);
+    const menus = this.campus.menus;
+    const now = new Date();
+    const going = whereTo(message);
+    const found = !going && menus?.items.length ? answerFood(message, menus, now, this.lastPlace) : null;
+    const modelInput = found ? formatQuestion(message, found) : `Facts:\n${factCard(menus, now)}\n\nStudent: ${message}`;
+    const intent = await this.model.read(message, this.last, this.memory.facts, modelInput);
     console.info("[chat]", this.model.name, intent);
     this.last = intent;
     const noted = this.keep(intent);
@@ -169,6 +177,23 @@ export class Assistant {
       this.from = null;
     }
 
+    if (found) {
+      const spoken = usableReply(intent.reply, found.picks);
+      const picks = spoken
+        ? [...found.picks].sort((a, b) => Number(spoken.toLowerCase().includes(b.name.toLowerCase())) - Number(spoken.toLowerCase().includes(a.name.toLowerCase())))
+        : found.picks;
+      this.last = {
+        action: "order",
+        place: found.ask.hall,
+        item: found.ask.item,
+        minPrice: found.ask.minPrice,
+        maxPrice: found.ask.maxPrice,
+        maxInclusive: found.ask.maxInclusive,
+        reply: spoken,
+      };
+      return finish(await this.presentFood(message, { ...found, picks, lead: spoken ?? found.lead }));
+    }
+
     switch (intent.action) {
       case "class":
         return Promise.resolve(this.toClass(intent)).then(finish);
@@ -183,6 +208,12 @@ export class Assistant {
       case "day":
         return Promise.resolve(this.dayPlan(intent.day)).then(finish);
       case "route":
+        if (going?.vagueFood && menus?.items.length) {
+          const hall = pickHall(menus, now);
+          return Promise.resolve(this.toPlace(hall, this.target(intent))).then((reply) =>
+            finish({ ...reply, text: `You didn't name a place, so I picked ${hall}.\n${reply.text}` }),
+          );
+        }
         if (intent.place) return Promise.resolve(this.toPlace(intent.place, this.target(intent))).then(finish);
         break;
       case "nearby":
@@ -551,35 +582,64 @@ export class Assistant {
 
   /** Recommendations and prices from the scraped menu, then a route to that hall. */
   private async orderFromMenus(intent: Intent, message: string, menus: ScrapedMenus, status?: string): Promise<Reply> {
-    const hall = resolveHall(intent.place ?? message) ?? resolveHall(message);
+    const cleaned = message.toLowerCase().replace(/[’']/g, "'").replace(/\s+/g, " ").trim();
+    const hall = resolveHall(intent.place ?? cleaned) ?? resolveHall(cleaned);
+    const budget = budgetOf(cleaned);
+    const said = dishOf(cleaned, hall);
+    const cheapest = /\b(cheapest|lowest(?:\s+price)?|least expensive|most affordable)\b/.test(cleaned);
     const ask = {
       hall,
-      item: intent.item,
-      minPrice: intent.minPrice,
-      maxPrice: intent.maxPrice,
-      maxInclusive: intent.maxInclusive,
+      item: said,
+      minPrice: budget.min != null && budget.min > 0 ? budget.min : undefined,
+      maxPrice: budget.max != null && budget.max > 0 ? budget.max : undefined,
+      maxInclusive: budget.max != null && budget.max > 0 && /\b(?:under|below|less than|cheaper than)\b/.test(cleaned) ? false : undefined,
+      sort: cheapest ? ("cheapest" as const) : undefined,
     };
-    const picks = recommend(menus, ask);
+    let picks = ask.maxPrice != null && ask.maxPrice <= 0 ? [] : recommend(menus, ask);
+    if (!picks.length && ((ask.maxPrice != null && ask.maxPrice <= 0) || !ask.item)) {
+      const recovered = answerFood(message, menus, new Date(), this.lastPlace);
+      return this.presentFood(message, recovered ?? { ask, picks: recommend(menus, { hall, sort: "cheapest" }, 4), lead: "" });
+    }
     if (!picks.length) {
-      const range = pricePhrase(intent.minPrice, intent.maxPrice);
+      const named = ask.item ? recommend(menus, { item: ask.item, hall }, 1) : [];
+      if (ask.item && !named.length) {
+        const meals = recommend(menus, { sort: "cheapest", meals: true }, 4);
+        if (meals.length) {
+          return this.presentFood(message, {
+            ask: { sort: "cheapest", meals: true },
+            picks: meals,
+            lead: "That isn't a dish on today's menu. Here are meals that are.",
+          });
+        }
+      }
+      const range = pricePhrase(ask.minPrice, ask.maxPrice);
       const where = hall ? ` at ${hall}` : "";
-      const dish = intent.item ? ` matching “${intent.item}”` : "";
+      const dish = ask.item ? ` matching “${ask.item}”` : "";
       return {
         text: `Nothing on today's menu${where}${dish}${range ? ` ${range}` : ""}. Try another hall, or a wider price.`,
       };
     }
+    return this.presentFood(message, { ask, picks, lead: "" }, status);
+  }
+
+  /** Show the dishes and walk to the nearest hall that has them. */
+  private async presentFood(message: string, found: FoodAnswer, status?: string): Promise<Reply> {
+    const { ask, lead } = found;
+    const picks = found.picks;
+    const hall = ask.hall;
+    if (!picks.length) {
+      return { text: lead || "Today's dining menu has nothing that matches." };
+    }
     const from = await this.start();
     if (!from) {
-      const preview = this.foodBill(picks, intent, hall);
-      return this.askWhere(`${preview}\nWhere are you? I'll take you to the closest hall that has it.`, () =>
-        this.orderFromMenus(intent, message, menus, status),
-      );
+      const preview = [lead, this.foodBill(picks.slice(0, 4), ask, hall)].filter(Boolean).join("\n");
+      return this.askWhere(`${preview}\nWhere are you? I'll take you to the closest hall that has it.`, () => this.presentFood(message, found, status));
     }
     const chosen = this.closestHall(picks, from);
     const here = picks.filter((p) => p.hall === chosen);
     const shown = (here.length ? here : picks).slice(0, 4);
     const elsewhere = [...new Set(picks.filter((p) => p.hall !== chosen).map((p) => p.hall))];
-    let bill = this.foodBill(shown, intent, chosen);
+    let bill = this.foodBill(shown, ask, chosen);
     if (elsewhere.length) bill += `\nAlso in range: ${elsewhere.slice(0, 3).join(", ")}.`;
     if (status) bill += ` ${status}`;
     if (/triton2\s?go|\bbox\b/i.test(message)) {
@@ -587,13 +647,13 @@ export class Assistant {
     }
     const place = this.placeFor(chosen);
     this.view.food?.(chosen);
-    if (!place) return { text: bill };
+    if (!place) return { text: [lead, bill].filter(Boolean).join("\n") };
     this.trip = { to: place, arriveBy: null, title: chosen, name: chosen, notes: [] };
     const routed = await this.go();
-    return { ...routed, text: `${bill}\n${routed.text}` };
+    return { ...routed, text: [lead, bill, routed.text].filter(Boolean).join("\n") };
   }
 
-  private foodBill(picks: FoodPick[], intent: Intent, hall?: string): string {
+  private foodBill(picks: FoodPick[], intent: { minPrice?: number; maxPrice?: number }, hall?: string): string {
     const range = pricePhrase(intent.minPrice, intent.maxPrice);
     const open = picks.some((p) => p.open);
     const head = hall && picks.every((p) => p.hall === hall) ? hall : "Dining";
@@ -682,6 +742,7 @@ export class Assistant {
       this.view.trip(null);
       return { text: `${trip.title}. No route from ${from.label}.` };
     }
+    if (trip.name) this.lastPlace = trip.name;
     this.mode = picked.mode;
     const planned = picked.planned;
     const route = planned.route;

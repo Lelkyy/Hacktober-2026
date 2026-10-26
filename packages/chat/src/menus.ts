@@ -44,6 +44,10 @@ export interface FoodAsk {
   maxPrice?: number;
   /** False for "under $10", so $10.00 itself is left out. */
   maxInclusive?: boolean;
+  /** "cheapest" lists the lowest prices. The default prefers the current meal. */
+  sort?: "cheapest";
+  /** No dish was named, so sauces, sides, and whole fruit are not answers. */
+  meals?: boolean;
   now?: Date;
 }
 
@@ -91,6 +95,9 @@ const GENERIC = new Set([
   "food", "meal", "meals", "something", "good", "best", "cheap", "eat", "get", "lunch", "dinner",
   "breakfast", "item", "dish", "things", "thing", "recommend", "recommendation", "suggestion",
   "hungry", "please", "some", "menu", "today", "open", "now",
+  "find", "that", "thats", "place", "places", "nearest", "closest", "actually", "really",
+  "want", "need", "looking", "show", "give", "anything", "where", "which", "what", "who",
+  "cheapest", "cheaper", "lowest", "least", "affordable", "inexpensive", "expensive", "foods",
 ]);
 
 export function pricePhrase(min?: number, max?: number): string {
@@ -131,7 +138,7 @@ export function budgetOf(text: string): { min?: number; max?: number } {
 
 /** Dish words left after the hall, the budget, and filler are removed. */
 export function dishOf(text: string, hall?: string): string | undefined {
-  let dish = text.toLowerCase();
+  let dish = text.toLowerCase().replace(/[’']/g, "");
   if (hall) {
     for (const entry of HALL_ALIASES.filter((e) => e.name === hall)) dish = dish.replace(new RegExp(escapeReg(entry.alias), "g"), " ");
   }
@@ -142,11 +149,12 @@ export function dishOf(text: string, hall?: string): string | undefined {
   for (const word of [
     "how much", "how long", "what should i", "what's", "whats", "what is", "is", "are", "a", "an", "the", "at", "for", "from",
     "price", "cost", "costs", "order", "menu", "please", "i want", "i need", "something", "best", "good", "cheap", "recommend",
-    "me", "some", "food", "to eat", "eat", "get", "two", "three", "four", "five", "and", "with", "under", "dollars", "dollar", "bucks",
+    "me", "some", "food", "foods", "to eat", "eat", "get", "two", "three", "four", "five", "and", "with", "under", "dollars", "dollar", "bucks",
+    "cheapest", "cheaper", "lowest", "least expensive", "most affordable", "inexpensive", "expensive",
   ]) {
     dish = dish.replace(new RegExp(`\\b${word}\\b`, "g"), " ");
   }
-  const words = dish.replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter((w) => w && !GENERIC.has(w) && !/^\d+$/.test(w));
+  const words = dish.replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter((w) => w.length > 2 && !GENERIC.has(w) && !GENERIC.has(stem(w)) && !/^\d+$/.test(w));
   const item = words.join(" ");
   return item.length > 2 ? item : undefined;
 }
@@ -163,6 +171,7 @@ export function recommend(menus: ScrapedMenus, ask: FoodAsk, limit = 12): FoodPi
   for (const item of menus.items) {
     if (item.date !== date) continue;
     if (hallName && item.hall !== hallName) continue;
+    if (ask.meals && !isMeal(item)) continue;
     if (ask.minPrice != null && (item.price == null || item.price < ask.minPrice)) continue;
     if (ask.maxPrice != null && (item.price == null || (ask.maxInclusive === false ? item.price >= ask.maxPrice : item.price > ask.maxPrice))) continue;
     if (item.price == null && (ask.minPrice != null || ask.maxPrice != null || words.length === 0)) continue;
@@ -187,6 +196,13 @@ export function recommend(menus: ScrapedMenus, ask: FoodAsk, limit = 12): FoodPi
   }
 
   scored.sort((a, b) => {
+    if (ask.sort === "cheapest") {
+      if (a.pick.open !== b.pick.open) return a.pick.open ? -1 : 1;
+      const ap = a.pick.price ?? Number.POSITIVE_INFINITY;
+      const bp = b.pick.price ?? Number.POSITIVE_INFINITY;
+      if (ap !== bp) return ap - bp;
+      return a.pick.name.localeCompare(b.pick.name);
+    }
     if (a.pick.open !== b.pick.open) return a.pick.open ? -1 : 1;
     const am = a.meal < 0 ? 9 : a.meal;
     const bm = b.meal < 0 ? 9 : b.meal;
@@ -205,7 +221,7 @@ export function recommend(menus: ScrapedMenus, ask: FoodAsk, limit = 12): FoodPi
     const key = `${row.pick.hall}|${row.pick.name}|${row.pick.price ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    if (!ask.hall) {
+    if (!ask.hall && ask.sort !== "cheapest") {
       const count = perHall.get(row.pick.hall) ?? 0;
       if (count >= 3) continue;
       perHall.set(row.pick.hall, count + 1);
@@ -214,6 +230,19 @@ export function recommend(menus: ScrapedMenus, ask: FoodAsk, limit = 12): FoodPi
     if (unique.length >= limit) break;
   }
   return unique;
+}
+
+const NOT_A_MEAL = new Set([
+  "Sauces", "Sides", "Extras", "Beverages", "Base", "Proteins",
+  "Build Your Own", "Burger Styles", "Breakfast A La Carte", "Menu Items", "Side Salads",
+  "Desserts", "Ice Cream",
+]);
+
+/** A plate, bowl, slice, or sandwich. Not ranch, a banana, or a slice of cheese. */
+function isMeal(item: ScrapedItem): boolean {
+  if (NOT_A_MEAL.has(item.category)) return false;
+  if (/^fruit,/i.test(item.name)) return false;
+  return true;
 }
 
 function ordered(a: number, b: number): { min: number; max: number } {
