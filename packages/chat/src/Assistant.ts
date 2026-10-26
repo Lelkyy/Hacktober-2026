@@ -702,6 +702,10 @@ export class Assistant {
       `${trip.title}.`,
       `${asked}${choice} from ${from.label}: ${minutes} min, ${distance(route.meters)}. ${leaveAdvice(route, picked.mode, minutes, trip.arriveBy, this.arriveEarlyMin)}`.trim(),
       also ? `Also: ${also}.` : "",
+      // The shortest-route skill: mention stairs on the fastest walk, and offer the step-free way.
+      picked.mode === "walk" && route.stairSegments > 0
+        ? `This walk takes stairs.${others.some((o) => o.mode === "accessible") ? " Pick No stairs below for a step-free route." : ""}`
+        : "",
       usual && !this.explicit ? `You usually ${MODES[usual.mode].label.toLowerCase()} (${Math.max(1, Math.ceil(usual.planned.minutes))} min). Say so if you want that instead.` : "",
       ...this.transitLines(route),
       ...this.insideLines(trip.to.endpoint, route),

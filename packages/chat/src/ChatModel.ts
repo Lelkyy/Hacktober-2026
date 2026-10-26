@@ -1,5 +1,6 @@
 import type { ChatSettings } from "./types.ts";
 import { cleanIntent, INTENT_SCHEMA, parseLocally, systemPrompt, type Intent } from "./intent.ts";
+import { SHORTEST_ROUTE } from "./skill.ts";
 
 /** Chrome's built-in model (the Prompt API). Not in TypeScript's DOM types yet. */
 interface ChromeModel {
@@ -47,7 +48,7 @@ export class ChatModel {
     const installed = await this.installedModel();
     if (installed) {
       this.brain = { kind: "ollama", model: installed };
-      this.onStatus(`Gemma (${installed}, installed through Ollama) is ready.`);
+      this.onStatus(`Gemma (${installed}, installed through Ollama) is ready${WITH_SKILL}.`);
       return;
     }
     const chrome = globalThis.LanguageModel;
@@ -56,7 +57,7 @@ export class ChatModel {
         const state = await chrome.availability(LANGUAGES);
         if (state !== "unavailable") {
           this.brain = { kind: "chrome", model: chrome, ready: state === "available" };
-          this.onStatus(state === "available" ? "Chrome's built-in AI is ready." : "Chrome will download its built-in AI (once) when you send your first message.");
+          this.onStatus(state === "available" ? `Chrome's built-in AI is ready${WITH_SKILL}.` : "Chrome will download its built-in AI (once) when you send your first message.");
           return;
         }
       } catch {
@@ -99,7 +100,7 @@ export class ChatModel {
         (names.length === 0 ? wanted : undefined);
       if (!model) return false;
       this.brain = { kind: "lmstudio", model };
-      this.onStatus(`Gemma (${model}, through LM Studio) is ready.`);
+      this.onStatus(`Gemma (${model}, through LM Studio) is ready${WITH_SKILL}.`);
       return true;
     } catch {
       return false;
@@ -235,7 +236,7 @@ export class ChatModel {
       .then((session) => {
         session.destroy();
         brain.ready = true;
-        this.onStatus("Chrome's built-in AI is ready.");
+        this.onStatus(`Chrome's built-in AI is ready${WITH_SKILL}.`);
       })
       .catch((err: unknown) => {
         brain.downloading = false;
@@ -253,5 +254,8 @@ function jsonObject(raw: string): string {
   const end = text.lastIndexOf("}");
   return start >= 0 && end > start ? text.slice(start, end + 1) : text;
 }
+
+/** Said once a model is ready: it reads the skill with every message. */
+const WITH_SKILL = `, with the ${SHORTEST_ROUTE.name} skill`;
 
 const LANGUAGES = { expectedInputs: [{ type: "text", languages: ["en"] }], expectedOutputs: [{ type: "text", languages: ["en"] }] };

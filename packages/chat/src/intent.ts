@@ -3,6 +3,7 @@ import { hallNamed } from "./dining.ts";
 import { budgetOf, dishOf, resolveHall } from "./menus.ts";
 import { PAYMENT_GUIDE, type Tender } from "./payment.ts";
 import { nearbyKind } from "./nearby.ts";
+import { skillPrompt } from "./skill.ts";
 
 /**
  * What a chat message asks for, as Gemma (or the fallback parser) reads it.
@@ -96,7 +97,7 @@ export const INTENT_SCHEMA = {
   required: ["action"],
 } as const;
 
-/** Instructions for Gemma. `now` so it can turn "at 3" into "15:00" sensibly. `facts` are details already remembered. */
+/** Instructions for Gemma, with the shortest-route skill. `now` so it can turn "at 3" into "15:00" sensibly. `facts` are details already remembered. */
 export function systemPrompt(now: Date, facts: string[] = []): string {
   const today = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
   const time = now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
@@ -124,6 +125,7 @@ ${PAYMENT_GUIDE}
 - at: a clock time in 24h "HH:MM"; "at 3" or "at 3pm" -> "15:00", "at noon" -> "12:00".
 - day: "today", "tomorrow" or a weekday name, if said.
 - remember: short lasting facts from THIS message only ("Usually bikes", "Usually starts at Sixth College", "Needs a step-free route", "Takes CSE 11"). Leave it out for a one-off trip, a time, or a question. If the fact is how they travel, also set mode. If it is where they usually start, also set from.
+${skillPrompt()}
 Examples:
 "I have math 20C today in 30 minutes" -> {"action":"class","course":"MATH 20C","day":"today","inMinutes":30}
 "cse 12 discussion at 4, biking from the price center" -> {"action":"class","course":"CSE 12","meeting":"discussion","at":"16:00","mode":"bike","from":"Price Center"}

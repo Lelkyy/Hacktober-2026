@@ -4,6 +4,7 @@ export * from "./ChatModel.ts";
 export * from "./Assistant.ts";
 export * from "./Location.ts";
 export * from "./TripPlanner.ts";
+export * from "./skill.ts";
 export * from "./classes.ts";
 export * from "./nearby.ts";
 export * from "./stops.ts";
