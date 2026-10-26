@@ -6,7 +6,7 @@ import { PROFILES, findRoute, findRouteArriveBy, hillFactor, rideFactor, rideRun
 import { dayClasses, defaultPick, groupOverlaps, nextClass, startOn, type ClassMeeting } from "./schedule.ts";
 import { formatCourseCode, searchCourses, sectionChoices, type CourseSections, type SectionsData } from "./sections.ts";
 import { TransitNetwork, type TransitData } from "./transit.ts";
-import { checkBusRoute, planRoute, routeEnds } from "./plan.ts";
+import { checkBusRoute, joinRoutes, planRoute, routeEnds } from "./plan.ts";
 import { buildingCentre } from "./indoor.ts";
 import { transitOptions } from "./transitOptions.ts";
 import { buildSteps } from "./instructions.ts";
@@ -241,6 +241,33 @@ describe("cyclists keep right", () => {
     const runs = rideRuns(g, PROFILES.bike, r.legs[0] as MoveLeg);
     expect(runs).toHaveLength(1);
     expect(runs[0].keepRight).toBe(true);
+  });
+});
+
+describe("joinRoutes", () => {
+  it("stitches hops and keeps the first leave and last arrive", () => {
+    const leaveAt = new Date("2026-10-25T17:00:00");
+    const mid = new Date("2026-10-25T17:10:00");
+    const arriveAt = new Date("2026-10-25T17:18:00");
+    const hop = (seconds: number, coords: LngLat[], leave: Date, arrive: Date): Route => ({
+      legs: [],
+      coordinates: coords,
+      meters: seconds,
+      minutes: seconds / 60,
+      seconds,
+      stairSegments: 0,
+      leaveAt: leave,
+      arriveAt: arrive,
+      usesTransit: false,
+    });
+    const joined = joinRoutes([
+      hop(60, [[0, 0], [1, 0]], leaveAt, mid),
+      hop(120, [[1, 0], [2, 0]], mid, arriveAt),
+    ]);
+    expect(joined.seconds).toBe(180);
+    expect(joined.coordinates).toEqual([[0, 0], [1, 0], [2, 0]]);
+    expect(joined.leaveAt).toBe(leaveAt);
+    expect(joined.arriveAt).toBe(arriveAt);
   });
 });
 

@@ -12,7 +12,7 @@ import {
   nextOpen,
   type DiningHall,
   type DiningMenus,
-} from "./diningMenu.ts";
+} from "@campus/chat";
 
 /** Every HDH hall: open or closed right now, then the week's hours and that day's menu. */
 export function FoodPanel({

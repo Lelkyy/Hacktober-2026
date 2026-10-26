@@ -2,15 +2,20 @@
  * Triton2Go, the way HDH describes it, plus today's public menu prices.
  * The app does not sign into a student's order. A clock time in Triton2Go is when
  * the kitchen is allowed to see the ticket, not when the food is ready.
+ * Hall names are the menu file's names (`resolveHall`); this file only knows
+ * which Venue page to fetch when that file isn't loaded.
  */
 
-export interface DiningHall {
+import { diningPin } from "@campus/core";
+import { money } from "./diningMenu.ts";
+import { resolveHall, scoreDish, stems } from "./menus.ts";
+
+export interface Venue {
   name: string;
-  /** What campus search should route to. */
+  /** Campus-map name to route to. */
   place: string;
   locId: string;
   locDetId: string;
-  aliases: string[];
 }
 
 export interface MenuItem {
@@ -20,7 +25,7 @@ export interface MenuItem {
 }
 
 export interface Menu {
-  hall: DiningHall;
+  hall: Venue;
   hours: string;
   items: MenuItem[];
 }
@@ -36,26 +41,33 @@ const NO_BOX = /soup|beverage|drink|coffee|tea|boba|matcha|soda|juice|water|pizz
 /** HDH says these are made to order, so they take longer than a fast station. */
 const MADE_TO_ORDER = /bistro|burger|hot dog|sandwich|quesadilla|omelet/i;
 
-export const HALLS: DiningHall[] = [
-  { name: "64 Degrees", place: "64 Degrees", locId: "2", locDetId: "37", aliases: ["64", "revelle", "sixty four"] },
-  { name: "Pines", place: "Pines", locId: "3", locDetId: "6", aliases: ["muir", "pines"] },
-  { name: "OceanView", place: "OceanView", locId: "8", locDetId: "8", aliases: ["oceanview", "ocean view", "marshall"] },
-  { name: "Ventanas", place: "Ventanas", locId: "9", locDetId: "52", aliases: ["ventanas", "cafe ventanas", "erc"] },
-  { name: "The Bistro", place: "The Bistro", locId: "13", locDetId: "27", aliases: ["bistro", "strand"] },
-  { name: "Foodworx", place: "Foodworx", locId: "14", locDetId: "13", aliases: ["foodworx", "food worx", "warren"] },
-  { name: "Restaurants at Sixth", place: "Crave", locId: "4", locDetId: "30", aliases: ["sixth", "crave", "restaurants at sixth"] },
-  { name: "Club Med", place: "Club Med", locId: "12", locDetId: "14", aliases: ["club med", "school of medicine"] },
-];
+/** Venue page for each hall the menu file names. The main station's ids. */
+const VENUE_LOC: Record<string, { locId: string; locDetId: string }> = {
+  "64 Degrees": { locId: "2", locDetId: "37" },
+  Bistro: { locId: "13", locDetId: "27" },
+  "Canyon Vista Marketplace": { locId: "10", locDetId: "22" },
+  "Cecil's at Faculty Club": { locId: "7", locDetId: "69" },
+  "Club Med": { locId: "12", locDetId: "14" },
+  Foodworx: { locId: "14", locDetId: "13" },
+  OceanView: { locId: "8", locDetId: "8" },
+  Pines: { locId: "3", locDetId: "6" },
+  "Restaurants at Sixth College": { locId: "4", locDetId: "30" },
+  Ventanas: { locId: "9", locDetId: "52" },
+  "Goody's Marketplace": { locId: "21", locDetId: "67" },
+};
 
 const cache = new Map<string, Promise<Menu>>();
 
-export function hallNamed(text: string): DiningHall | undefined {
-  const q = text.toLowerCase();
-  return HALLS.find((h) => [h.name, h.place, ...h.aliases].some((n) => q.includes(n.toLowerCase())));
+/** The hall `text` names, with the page to load when the scraped menu isn't there. */
+export function hallNamed(text: string): Venue | undefined {
+  const name = resolveHall(text);
+  const loc = name ? VENUE_LOC[name] : undefined;
+  if (!name || !loc) return undefined;
+  return { name, place: diningPin(name), ...loc };
 }
 
 /** Items and hours from an HDH Venue page. Each dish is listed twice; one copy is kept. */
-export function parseMenu(html: string, hall: DiningHall): Menu {
+export function parseMenu(html: string, hall: Venue): Menu {
   const hours = html.match(/id="station-hours">\s*([^<]+)/)?.[1]?.replace(/\s+/g, " ").trim() || "Hours aren't listed";
   const seen = new Set<string>();
   const items: MenuItem[] = [];
@@ -71,7 +83,7 @@ export function parseMenu(html: string, hall: DiningHall): Menu {
   return { hall, hours, items };
 }
 
-export function loadMenu(hall: DiningHall): Promise<Menu> {
+export function loadMenu(hall: Venue): Promise<Menu> {
   const hit = cache.get(hall.name);
   if (hit) return hit;
   const pending = fetch(`/hdh/dining/apps/diningservices/Restaurants/Venue_V3?locId=${hall.locId}&locDetID=${hall.locDetId}&dayNum=0`)
@@ -85,25 +97,12 @@ export function loadMenu(hall: DiningHall): Promise<Menu> {
   return pending;
 }
 
-/** "bobas" matches "boba". */
-function stem(word: string): string {
-  return word.length > 3 && word.endsWith("s") ? word.slice(0, -1) : word;
-}
-
 /** Every priced dish that fits the query, best first. "boba" returns each boba on the menu. */
 export function findItems(menu: Menu, query: string): MenuItem[] {
-  const q = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  if (!q) return [];
-  const words = q.split(" ").map(stem).filter((w) => w.length > 2);
+  const words = stems(query);
+  if (!words.length) return [];
   const scored = menu.items
-    .map((item) => {
-      const name = item.name.toLowerCase();
-      const stemmed = name.split(/\s+/).map(stem).join(" ");
-      if (stemmed === words.join(" ")) return { item, score: 100 };
-      if (words.every((w) => stemmed.includes(w))) return { item, score: 80 };
-      const hits = words.filter((w) => stemmed.includes(w)).length;
-      return { item, score: words.length ? (hits / words.length) * 50 : 0 };
-    })
+    .map((item) => ({ item, score: scoreDish(item.name, words) }))
     .filter((s) => s.score >= 50)
     .sort((a, b) => b.score - a.score || (a.item.price ?? 99) - (b.item.price ?? 99));
   if (!scored.length) return [];
@@ -125,7 +124,7 @@ export function boxesFor(name: string, quantity: number): number {
  * A rough pickup guess from HDH's published notes, in minutes.
  * Not the clock Triton2Go shows.
  */
-export function prepMinutes(name: string, hall: DiningHall, now = new Date()): number {
+export function prepMinutes(name: string, hall: Venue, now = new Date()): number {
   const hour = now.getHours() + now.getMinutes() / 60;
   const made = MADE_TO_ORDER.test(name) || MADE_TO_ORDER.test(hall.name);
   let minutes = made ? 12 : 5;
@@ -134,10 +133,6 @@ export function prepMinutes(name: string, hall: DiningHall, now = new Date()): n
   if (offPeak) minutes -= 2;
   if (peak) minutes += 5;
   return Math.max(3, minutes);
-}
-
-export function money(dollars: number): string {
-  return `$${dollars.toFixed(2)}`;
 }
 
 /**
@@ -153,77 +148,6 @@ export function explainStatus(text: string): string | undefined {
     return `A clock time in Triton2Go is not when the food will be ready. It's when your ticket joins the line the kitchen can see. You still wait after that.`;
   }
   return undefined;
-}
-
-export interface FoodHit {
-  name: string;
-  hall: string;
-  locId: string;
-  locDetId: string;
-  /** "Pines / Breeze" */
-  where: string;
-  /** "9:00 AM - 11:00 PM" or "Closed" */
-  hours: string;
-}
-
-/** Hits from HDH's public menu search (every hall, not a signed-in Triton2Go queue). */
-export function parseSearch(html: string): FoodHit[] {
-  const hits: FoodHit[] = [];
-  const row = /<h4>([^<]+)<\/h4>[\s\S]*?<a href="[^"]*Venue_V3\?locId=(\d+)&locDetID=(\d+)">([^<]+)<\/a>\s*<br\s*\/?>\s*([^<]*?)\s*<br\s*\/?>\s*Today,\s*([^<]+)/gi;
-  for (const match of html.matchAll(row)) {
-    const name = match[1].replace(/\s+/g, " ").trim();
-    if (!name || name.startsWith('"')) continue;
-    hits.push({
-      name,
-      locId: match[2],
-      locDetId: match[3],
-      hall: match[4].trim(),
-      where: match[5].replace(/\s*\/\s*$/, "").replace(/\s+/g, " ").trim(),
-      hours: match[6].replace(/\s+/g, " ").trim(),
-    });
-  }
-  return hits;
-}
-
-const searchCache = new Map<string, Promise<FoodHit[]>>();
-
-/** A hall from a search hit, using the known list when we have one. */
-export function hallFromHit(hit: FoodHit): DiningHall {
-  return hallNamed(hit.hall) ?? { name: hit.hall, place: hit.hall, locId: hit.locId, locDetId: hit.locDetId, aliases: [] };
-}
-
-/** Every hall currently listing this food, from HDH's menu search. */
-export function searchMenus(query: string): Promise<FoodHit[]> {
-  const q = stem(query).trim();
-  if (!q) return Promise.resolve([]);
-  const hit = searchCache.get(q);
-  if (hit) return hit;
-  const pending = fetch(`/hdh/dining/apps/diningservices/Restaurants/SearchResults?searchText=${encodeURIComponent(q)}`)
-    .then((res) => {
-      if (!res.ok) throw new Error(`HDH search HTTP ${res.status}`);
-      return res.text();
-    })
-    .then(parseSearch);
-  searchCache.set(q, pending);
-  pending.catch(() => searchCache.delete(q));
-  return pending;
-}
-
-/** "open until 11:00 PM" or "closed right now", from the hours HDH prints. */
-export function openStatus(hours: string, now = new Date()): string {
-  if (/closed/i.test(hours)) return `closed right now`;
-  const match = hours.match(/(\d{1,2}):(\d{2})\s*(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-  if (!match) return hours;
-  const mins = (h: string, m: string, ap: string) => {
-    let hour = Number(h) % 12;
-    if (ap.toUpperCase() === "PM") hour += 12;
-    return hour * 60 + Number(m);
-  };
-  const start = mins(match[1], match[2], match[3]);
-  const end = mins(match[4], match[5], match[6]);
-  const cur = now.getHours() * 60 + now.getMinutes();
-  const open = end < start ? cur >= start || cur < end : cur >= start && cur < end;
-  return open ? `open until ${match[4]}:${match[5]} ${match[6].toUpperCase()}` : `closed right now (hours ${hours})`;
 }
 
 export function quote(menu: Menu, item: MenuItem, quantity: number, now = new Date()): string {
@@ -248,7 +172,7 @@ export function quote(menu: Menu, item: MenuItem, quantity: number, now = new Da
   }
   if (total !== undefined) lines.push(`About ${money(total)} at checkout${deposit ? `, including the deposit` : ""}.`);
   lines.push(
-    `${menu.hall.name} is ${openStatus(menu.hours, now)}. A rough pickup is about ${prep} min once the kitchen has the ticket${MADE_TO_ORDER.test(item.name) || MADE_TO_ORDER.test(menu.hall.name) ? " (it's made to order)" : ""}. HDH does not publish the live Triton2Go queue without a login; off-peak (7–9am and 2–5pm) is when they say the line is shorter.`,
+    `${menu.hall.name} is listed as ${menu.hours}. A rough pickup is about ${prep} min once the kitchen has the ticket${MADE_TO_ORDER.test(item.name) || MADE_TO_ORDER.test(menu.hall.name) ? " (it's made to order)" : ""}. Off-peak, HDH says 7–9am and 2–5pm are faster.`,
   );
   lines.push(`On the Triton2Go app, only "Pick up" or "Ready now" means it's actually ready.`);
   return lines.join(" ");

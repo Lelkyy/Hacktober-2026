@@ -27,3 +27,6 @@ apps/web/public/data/sections.json
 .agents/
 _bmad/
 skills-lock.json
+
+# Agent manager board (live tasks, not source)
+.cursor/agent-manager/state/

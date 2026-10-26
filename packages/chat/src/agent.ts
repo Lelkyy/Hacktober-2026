@@ -1,186 +1,126 @@
+import { integrateIntent } from "./integrate.ts";
+import { cleanIntent, type Intent } from "./intent.ts";
+import { skillPrompt } from "./skills.ts";
+
+/** The one tool the model may call. The app runs it; the model does not write the answer. */
+export const AGENT_TOOLS = ["trip", "food", "nearby", "classes", "stop", "say"] as const;
+
+export type AgentTool = (typeof AGENT_TOOLS)[number];
+
 /**
- * Answers a food question from today's menu.
- * The student's sentence is the question, not a dish name.
+ * A small schema on purpose. The long intent schema is about 1,500 tokens of
+ * instructions, and a local model spends its time on those tokens.
  */
+export const AGENT_SCHEMA = {
+  type: "object",
+  properties: {
+    tool: { type: "string", enum: AGENT_TOOLS },
+    to: { type: "string" },
+    from: { type: "string" },
+    place: { type: "string" },
+    item: { type: "string" },
+    course: { type: "string" },
+    what: { type: "string" },
+    mode: { type: "string", enum: ["walk", "accessible", "bike", "bus"] },
+    maxPrice: { type: "number" },
+    minPrice: { type: "number" },
+    maxInclusive: { type: "boolean" },
+    along: { type: "boolean" },
+    via: { type: "array", items: { type: "string" } },
+    quantity: { type: "number" },
+    inMinutes: { type: "number" },
+    at: { type: "string" },
+    day: { type: "string" },
+    meeting: { type: "string", enum: ["lecture", "discussion", "lab", "midterm", "final"] },
+    action: { type: "string", enum: ["next", "add", "drop", "classes", "day", "class", "change"] },
+    reply: { type: "string" },
+    remember: { type: "array", items: { type: "string" } },
+  },
+  required: ["tool"],
+} as const;
 
-import { money } from "./dining.ts";
-import { skillPrompt } from "./skill.ts";
-import { budgetOf, dishOf, pricePhrase, recommend, resolveHall, type FoodAsk, type FoodPick, type ScrapedMenus } from "./menus.ts";
-
-export interface FoodAnswer {
-  ask: FoodAsk;
-  picks: FoodPick[];
-  /** The first sentence. Empty when the menu lines already say the whole thing. */
-  lead: string;
+/**
+ * One turn:
+ * 1. The local reader handles a clear request, with no model call.
+ * 2. A hard request gets this prompt, the skills that line needs, and one tool call.
+ * 3. The app runs the tool on campus data (places, menus, the path graph).
+ */
+export function agentPrompt(now: Date, facts: string[], message = "", local?: Intent): string {
+  const when = `${now.toLocaleDateString("en-US", { weekday: "long" })} ${now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
+  const known = facts.length ? ` Remembered, unless this message says otherwise: ${facts.join("; ")}.` : "";
+  return `It is ${when}. Call one campus tool. Return one JSON object and nothing else.${known}
+tool is trip, food, nearby, classes, stop, or say.
+trip: going somewhere, including to a class ("math 20C in 30 minutes" is a trip, with course and inMinutes). to, from, via (extra stops before to, in order), mode (walk, bike, bus, or accessible), course, meeting, inMinutes, at (HH:MM), day.
+food: a dish, a price, or food on the way. item is the dish only. maxPrice, minPrice, quantity, place (a dining hall only), to (where they are going), from, along true when the food should be near the route. "under 10" is maxPrice 10, not a dish and not a time.
+nearby: the closest restroom, water, coffee, food, printer, parking, bike rack, or ATM. what, place.
+classes: their schedule. action is next, add, drop, classes, or day. course, day.
+stop: the next bus. place is the stop; leave it out for the nearest stop.
+say: anything else. reply answers what they said in one short sentence. If it is not a campus question, say so and name the closest thing you can do. Never invent a room, a time, or a route.
+trip.to is the destination (shortest-route --to). trip.from is --from. The app runs the graph and writes the answer.
+Fix place typos (mur is Muir). Leave out fields the message does not say. A follow-up only changes the previous request.
+${skillPrompt(message, local)}`;
 }
 
-/** A price or a "what should I eat" question. A route or a payment question is not one. A price of $0 is ignored. */
-export function answerFood(message: string, menus: ScrapedMenus, now = new Date(), lastPlace?: string | null): FoodAnswer | null {
-  const text = message.toLowerCase().replace(/[’']/g, "'").replace(/\s+/g, " ").trim();
-  const budget = budgetOf(text);
-  const max = budget.max != null && budget.max > 0 ? budget.max : undefined;
-  const min = budget.min != null && budget.min > 0 ? budget.min : undefined;
-  const cheapest = /\b(cheapest|lowest(?:\s+price)?|least expensive|most affordable)\b/.test(text);
-  const askingMenu = /\b(what(?:'s| is) good|something to eat|cheap(?:est|er)?|recommend|hungry|on the menu)\b/.test(text);
-  const wantsFood = askingMenu || cheapest || /\b(foods?|eats?|eating|hungry|meals?|menus?|lunch|dinner|breakfast|dishes?|snacks?)\b/.test(text);
-  if (max == null && min == null && !wantsFood) return null;
-  if (/\b(dining dollars?|triton dollars?|triton cash|\bebt\b|calfresh)\b/.test(text)) return null;
-  if (max == null && min == null && /\b(map me to|map to|take me to|directions to|bring me to|get me to|send me to)\b/.test(text)) return null;
+/** The model's tool call, with any slot it skipped filled from the local read. */
+export function intentFromAgent(raw: unknown, local: Intent, message: string, isCourse: (code: string) => boolean): Intent | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = { ...(raw as Record<string, unknown>) };
+  const tool = typeof record.tool === "string" ? record.tool : undefined;
+  const action = actionForTool(tool, record);
+  if (action) record.action = action;
+  if (record.action === "route" && typeof record.place !== "string" && typeof record.to === "string") record.place = record.to;
+  const cleaned = cleanIntent(record);
+  if (!cleaned) return null;
+  return integrateIntent(fillFromLocal(cleaned, local, message, isCourse), local, message);
+}
 
-  const hall = resolveHall(text);
-  const item = dishOf(text, hall);
-  const under = max != null && /\b(?:under|below|less than|cheaper than)\b/.test(text);
-  const ask: FoodAsk = {
-    hall,
-    item,
-    minPrice: min,
-    maxPrice: max,
-    maxInclusive: under ? false : undefined,
-    sort: cheapest ? "cheapest" : undefined,
-    meals: !item,
-    now,
-  };
-  let picks = recommend(menus, ask, 8);
-  let lead = "";
-  const checking = /\b(is it|is that|actually|really|for real)\b/.test(text);
-  const cafe = checking && lastPlace && !resolveHall(lastPlace) ? `${lastPlace} isn't on the dining-hall menu, so I can't confirm its prices. ` : "";
+/** Smaller models answer faster. `e4b` is 4, `12b` is 12. Unknown sizes sort last. */
+export function modelSize(id: string): number {
+  const match = id.match(/(\d+(?:\.\d+)?)b/i);
+  return match ? Number(match[1]) : 99;
+}
 
-  if (!picks.length) {
-    picks = recommend(menus, { hall, sort: "cheapest", now }, 4);
-    const range = pricePhrase(min, max);
-    const where = hall ? ` at ${hall}` : "";
-    const dish = item ? ` matching “${item}”` : "";
-    const top = picks.find((p) => p.price != null);
-    lead = `${cafe}Nothing on today's dining menu${where}${dish}${range ? ` is ${range}` : ""}.${top ? ` Closest price: ${top.name} at ${top.hall}, ${money(top.price!)}.` : ""} Dining halls only — I don't have prices for other cafes.`;
-    ask.maxPrice = undefined;
-    ask.minPrice = undefined;
-    ask.item = undefined;
-  } else if (cheapest && !item) {
-    lead = `${cafe}Here are the cheapest meals on today's dining menus. I'll take you to the nearest hall. Dining halls only — I don't have prices for other cafes.`;
-  } else if (!hall && !item) {
-    lead = `${cafe}Here's what's on today's dining menus. I'll take you to the nearest hall. Dining halls only — I don't have prices for other cafes.`;
-  } else if (cafe) {
-    lead = cafe.trim();
+function actionForTool(tool: string | undefined, record: Record<string, unknown>): Intent["action"] | undefined {
+  if (tool === "food") return "order";
+  if (tool === "nearby") return "nearby";
+  if (tool === "stop") return "stop";
+  if (tool === "say") return "other";
+  if (tool === "trip") return typeof record.course === "string" && record.course.trim() ? "class" : "route";
+  if (tool === "classes") {
+    const action = record.action;
+    if (action === "add" || action === "drop" || action === "classes" || action === "day" || action === "next" || action === "class") return action;
+    if (typeof record.course === "string" && record.course.trim()) return "class";
+    if (typeof record.day === "string" && record.day.trim()) return "day";
+    return "next";
   }
-  return { ask, picks, lead };
+  return undefined;
 }
 
-const NAV = /\b(?:map(?: me)? to|take me(?: to)?|bring me(?: to)?|get me to|send me to|show me|directions to|route to|navigate to|walk me to|head to|go to|going to)\s+(?:a |an |the )?(.+?)\s*$/;
+const SLOT_KEYS = ["from", "to", "place", "mode", "what", "meeting", "day", "at", "inMinutes", "quantity", "minPrice", "maxPrice", "maxInclusive", "along", "via", "item"] as const;
 
-/**
- * A "take me there" sentence, in any wording the pattern covers.
- * `vagueFood` means they asked for food but did not name a place or a dish.
- */
-export function whereTo(message: string): { place: string; vagueFood: boolean } | null {
-  const text = message.toLowerCase().replace(/[’']/g, "'").replace(/\s+/g, " ").trim();
-  const budget = budgetOf(text);
-  if (budget.max != null || budget.min != null) return null;
-  const dest = text.match(NAV)?.[1]?.replace(/[?.!]+$/g, "").trim();
-  if (!dest) return null;
-  const hall = resolveHall(dest);
-  const foodish = /\b(foods?|eats?|eating|dining|restaurants?|hungry|meals?|lunch|dinner|breakfast)\b/.test(dest);
-  const dish = dishOf(dest, hall);
-  const vagueFood = foodish && !hall && (!dish || !dish.includes(" "));
-  return { place: hall ?? dest, vagueFood };
-}
-
-/** A dining hall that is actually serving, so an unnamed "food place" still goes somewhere. */
-export function pickHall(menus: ScrapedMenus, now = new Date()): string {
-  const picks = recommend(menus, { meals: true, sort: "cheapest", now }, 30);
-  return picks.find((p) => p.open)?.hall ?? picks[0]?.hall ?? menus.halls[0]?.name ?? "Pines";
-}
-
-/** Places and prices Gemma is allowed to copy. The same card is used for every wording. */
-export function factCard(menus: ScrapedMenus | null | undefined, now = new Date()): string {
-  const meals = menus?.items.length ? recommend(menus, { meals: true, sort: "cheapest", now }, 6) : [];
-  const lines = meals.map((p) => `- ${p.name} | ${p.hall} | ${p.price != null ? money(p.price) : "no price"} | ${p.open ? "open" : "closed"}`);
-  return [
-    "Places: Pines, 64 Degrees, OceanView, Ventanas, Canyon Vista, Foodworx, Bistro, Club Med, Taco Bell, Panda Express, Subway, Burger King, Starbucks, Sunshine Market",
-    "Menu:",
-    lines.join("\n") || "- none loaded",
-    "Payment: Dining Dollars = dining halls and HDH markets. Triton Cash = those plus Panda Express, Subway, Taco Bell, Burger King, Starbucks. EBT = HDH markets only.",
-  ].join("\n");
-}
-
-/**
- * Instructions for every message. One skill, not a different rule per sentence:
- * the shortest-route skill from .cursor/skills is part of it.
- */
-export function turnSkill(): string {
-  return [
-    "You help a UCSD student. The sentence may be casual, incomplete, or misspelled.",
-    "Use only the Facts for food and prices. Do not copy the student's sentence into item or place.",
-    "action route: they want to go somewhere. place is the building or place they named (Geisel, Price Center, WLH 2001), as written. Only if they asked for food without naming a place, copy one from Places.",
-    "from: where they start, if they said it.",
-    "action order: they want what to eat or a price. item is a Menu dish only when they named that dish. Otherwise omit item. Price Center is a place, not a price.",
-    "action nearby: they want the closest restroom, water, coffee, or food.",
-    "reply is two sentences using the Facts.",
-    skillPrompt(),
-  ].join("\n");
-}
-
-/**
- * The only instructions Gemma gets on a food turn. Routes go through turnSkill, which carries
- * the shortest-route skill; the long navigation prompt is too much for a menu question.
- */
-export function foodSkill(): string {
-  return [
-    "You fill one JSON object for a UCSD dining question.",
-    "The user message already has the fields and the only menu you may use.",
-    "Copy action, item, place, and maxPrice from that message.",
-    "reply is two sentences. Use dish names and prices from Menu only.",
-    "Do not invent a dish or a price.",
-  ].join("\n");
-}
-
-/**
- * The user turn sent to the model. The blanks come first, then the menu, then the
- * sentence. A small model copies the blanks instead of guessing a dish and a price.
- */
-export function formatQuestion(message: string, found: FoodAnswer): string {
-  const lines = found.picks.slice(0, 8).map((p) => {
-    const price = p.price != null ? money(p.price) : "no price";
-    const when = p.open ? "open" : "closed";
-    return `- ${p.name} | ${p.hall} | ${price} | ${when}`;
-  });
-  const price = found.ask.maxPrice != null
-    ? `maxPrice: ${found.ask.maxPrice}${found.ask.maxInclusive === false ? " (under this, so this price itself is too much)" : ""}`
-    : "maxPrice: omit";
-  const item = found.ask.item ? `item: ${found.ask.item}` : "item: omit";
-  const place = found.ask.hall ? `place: ${found.ask.hall}` : "place: omit";
-  const asked = found.ask.item
-    ? `Student asked: ${message.trim()}`
-    : found.ask.sort === "cheapest"
-      ? "Student asked for the cheapest food. They did not name a dish."
-      : found.ask.maxPrice != null
-        ? `Student asked for food under $${found.ask.maxPrice}. They did not name a dish.`
-        : "Student asked for food. They did not name a dish or a budget.";
-  return [
-    "Fill this JSON in. Copy the fields. Do not guess a dish or a price.",
-    "action: order",
-    item,
-    place,
-    price,
-    "reply: two sentences. Name dishes and prices copied from Menu. Say you will take them to the nearest hall.",
-    "",
-    "Menu:",
-    lines.join("\n") || "- none",
-    "",
-    asked,
-  ].join("\n");
-}
-
-/** The model's sentence, when it actually used the menu. Otherwise the menu text stands. */
-export function usableReply(reply: string | undefined, picks: FoodPick[]): string | undefined {
-  if (!reply) return undefined;
-  const text = reply.replace(/\s+/g, " ").trim();
-  if (text.length < 20 || text.length > 360) return undefined;
-  if (/find that|under \$0|nothing costs/i.test(text)) return undefined;
-  if (!picks.some((p) => text.toLowerCase().includes(p.name.toLowerCase()))) return undefined;
-  const amounts = text.match(/\$\d+(?:\.\d+)?/g) ?? [];
-  for (const amount of amounts) {
-    const n = Number(amount.slice(1));
-    if (!picks.some((p) => p.price != null && Math.abs(p.price - n) < 0.001)) return undefined;
+function fillFromLocal(intent: Intent, local: Intent, message: string, isCourse: (code: string) => boolean): Intent {
+  for (const key of SLOT_KEYS) {
+    if (intent[key] === undefined && local[key] !== undefined) intent[key] = local[key] as never;
   }
-  return text;
+  if (!intent.remember?.length && local.remember?.length) intent.remember = local.remember;
+  if (intent.course && !isCourse(intent.course)) intent.course = local.course && isCourse(local.course) ? local.course : undefined;
+  if (!intent.course && local.course && isCourse(local.course) && intent.action !== "nearby" && intent.action !== "stop" && intent.action !== "order") {
+    intent.course = local.course;
+    if (intent.action === "route" || intent.action === "other" || intent.action === "next") intent.action = "class";
+  }
+  if (!intent.course && intent.action === "class") intent.action = local.place ? "route" : local.action;
+  // "under 10" is a price. A clock is the only reason to keep a time.
+  if (intent.at && !/\b(?:at|by|around|before|after)\s+\d|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b(?:noon|midnight)\b/i.test(message)) delete intent.at;
+  const budget = local.minPrice != null || local.maxPrice != null;
+  if ((local.along || (budget && local.to)) && (intent.action === "route" || intent.action === "other")) {
+    intent.action = "order";
+    intent.along = true;
+    intent.to ??= local.to;
+    intent.from ??= local.from;
+    intent.maxPrice ??= local.maxPrice;
+    intent.minPrice ??= local.minPrice;
+    if (local.maxInclusive === false) intent.maxInclusive = false;
+    if (intent.place === intent.to) delete intent.place;
+  }
+  return intent;
 }

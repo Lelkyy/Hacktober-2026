@@ -106,6 +106,29 @@ export function planRoute(graph: CampusGraph, from: Endpoint, to: Endpoint, opts
   return { ok: true, route, connectors: [...connectors, ...doorWalks(from, to, route)] };
 }
 
+/** Stitch hop-by-hop routes. The last place is the destination; earlier hops stay on the path. */
+export function joinRoutes(parts: Route[]): Route {
+  if (parts.length === 1) return parts[0];
+  const coordinates: LngLat[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const coords = parts[i].coordinates;
+    if (i === 0) coordinates.push(...coords);
+    else coordinates.push(...coords.slice(1));
+  }
+  const seconds = parts.reduce((sum, part) => sum + part.seconds, 0);
+  return {
+    legs: parts.flatMap((part) => part.legs),
+    coordinates,
+    meters: parts.reduce((sum, part) => sum + part.meters, 0),
+    seconds,
+    minutes: seconds / 60,
+    stairSegments: parts.reduce((sum, part) => sum + part.stairSegments, 0),
+    leaveAt: parts[0].leaveAt,
+    arriveAt: parts[parts.length - 1].arriveAt,
+    usesTransit: parts.some((part) => part.usesTransit),
+  };
+}
+
 /** The door of a building at a node the route starts or ends at, if one is. */
 export function doorAt(building: Building, node: number): Entrance | undefined {
   return node >= 0 ? (building.entrances ?? []).find((d) => d.node === node) : undefined;

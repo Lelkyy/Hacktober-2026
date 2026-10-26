@@ -1,4 +1,4 @@
-import type { TravelMode } from "./intent.ts";
+import { isLastingFact, type TravelMode } from "./intent.ts";
 
 const KEY = "chat.memory";
 const MAX_FACTS = 8;
@@ -14,7 +14,11 @@ export interface Memory {
 export function loadMemory(): Memory {
   try {
     const raw = JSON.parse(localStorage.getItem(KEY) ?? "{}") as Partial<Memory>;
-    return { mode: raw.mode, start: raw.start, facts: Array.isArray(raw.facts) ? raw.facts.filter((f) => typeof f === "string") : [] };
+    return {
+      mode: raw.mode,
+      start: raw.start,
+      facts: Array.isArray(raw.facts) ? raw.facts.filter((f): f is string => typeof f === "string" && isLastingFact(f)) : [],
+    };
   } catch {
     return { facts: [] };
   }
@@ -31,6 +35,6 @@ export function saveMemory(memory: Memory): void {
 /** Keep a lasting fact. One-off directions never get here. */
 export function noteFact(memory: Memory, fact: string): void {
   const clean = fact.replace(/\s+/g, " ").trim().slice(0, 140);
-  if (clean.length < 3) return;
+  if (clean.length < 3 || !isLastingFact(clean)) return;
   memory.facts = [...memory.facts.filter((f) => f.toLowerCase() !== clean.toLowerCase()), clean].slice(-MAX_FACTS);
 }

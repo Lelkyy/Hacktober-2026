@@ -132,7 +132,21 @@ export function campusMapPlaces(data: CampusMapPoints | null | undefined): Place
   return [...byName.values()];
 }
 
+/** HDH hall names, as the menu file spells them. */
+export function hdhHalls(): string[] {
+  return HDH.map((h) => h.hall);
+}
+
+/**
+ * Campus-map name for an HDH hall. The hall's own name when the map uses that
+ * ("Pines"); the map's name when it doesn't ("Bistro" is "The Bistro at the Strand").
+ */
+export function diningPin(hall: string): string {
+  const key = nameKey(hall);
+  return HDH.find((h) => nameKey(h.hall) === key)?.near ?? hall;
+}
+
 /** Names compared without case, accents or punctuation: "Zanzibar Café" is "Zanzibar Cafe", "Audrey's" is "Audrey’s". */
-function nameKey(name: string): string {
+export function nameKey(name: string): string {
   return name.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }

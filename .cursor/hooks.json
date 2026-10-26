@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "node .cursor/hooks/agent-manager.mjs"
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "node .cursor/hooks/agent-manager.mjs"
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "node .cursor/hooks/agent-manager.mjs",
+        "matcher": "^Task$"
+      }
+    ],
+    "subagentStart": [
+      {
+        "command": "node .cursor/hooks/agent-manager.mjs"
+      }
+    ],
+    "subagentStop": [
+      {
+        "command": "node .cursor/hooks/agent-manager.mjs",
+        "loop_limit": 1
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "node .cursor/hooks/agent-manager.mjs"
+      }
+    ],
+    "stop": [
+      {
+        "command": "node .cursor/hooks/agent-manager.mjs",
+        "loop_limit": 1
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "node .cursor/hooks/agent-manager.mjs"
+      }
+    ]
+  }
+}

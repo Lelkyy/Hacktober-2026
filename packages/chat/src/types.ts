@@ -25,15 +25,17 @@ export interface ChatCampus {
   mapPoints: CampusMapPoints | null;
   /** Scraped HDH menus, when this app has them. Read when a food question is asked. */
   menus?: ScrapedMenus | null;
+  /** Step-free transit walks. Read when a route is planned, so it follows the map's toggle. */
+  readonly transitStepFree?: boolean;
 }
 
 /** Knobs each app sets. */
 export interface ChatSettings {
-  /** "auto": Gemma in LM Studio, else Ollama, else Chrome's built-in model, else simple patterns. "off": patterns only. */
+  /** "auto": Qwen in LM Studio, else Ollama, else Chrome's built-in model, else simple patterns. "off": patterns only. */
   gemma: "auto" | "off";
-  /** LM Studio model id (`lms ls`); any loaded "gemma…" model works too. */
+  /** LM Studio model id (`lms ls`). A loaded Qwen model is used when this exact id is absent. */
   lmStudioModel: string;
-  /** The Ollama model to use; any "gemma…" model Ollama has works too. */
+  /** The Ollama model to use when LM Studio isn't running. */
   ollamaModel: string;
   /** Aim to reach class this many minutes before it starts. */
   arriveEarlyMin: number;

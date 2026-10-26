@@ -10,7 +10,7 @@ import {
   type DiningMatch,
   type DiningMenus,
   type DiningStation,
-} from "./diningMenu.ts";
+} from "@campus/chat";
 
 /** One hall: each station's hours, then that station's menu. `date` picks the day; otherwise today (or the saved same weekday). */
 export function DiningMenu({ menus, match, date: dateProp, bare }: { menus: DiningMenus; match: DiningMatch; date?: string; bare?: boolean }) {

@@ -11,6 +11,11 @@ export interface Timing {
   arriveBy?: Date;
 }
 
+/** The option Transit mode means: the first real ride, or the only option when that ride is just a walk. */
+export function primaryTransit<T extends { walkOnly: boolean }>(options: readonly T[]): T | undefined {
+  return options.find((o) => !o.walkOnly) ?? options[0];
+}
+
 /** One choice in the Transit list (walking can be one of them, as in Google Maps). */
 export interface TransitOption {
   route: Route;

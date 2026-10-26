@@ -16,7 +16,7 @@ interface Kind {
 
 /** Order matters: the first whose words match wins ("coffee" before "food"). */
 export const NEARBY_KINDS: Kind[] = [
-  { id: "restroom", category: "restrooms", label: "restroom", words: /\b(restrooms?|bathrooms?|toilets?|washrooms?|loo|wc)\b/, kinds: ["Gender Inclusive", "Public"] },
+  { id: "restroom", category: "restrooms", label: "restroom", words: /\b(restrooms?|bathrooms?|toilets?|washrooms?|loo|wc|pee|peeing|piss|pissing|poop|pooping|shit|shitting|potty|tinkle)\b/, kinds: ["Gender Inclusive", "Public"] },
   { id: "water", category: "water", label: "water refill station", words: /\b(water|refill|hydration|fountain|bottle filler)\b/, kinds: ["Hydration"] },
   {
     id: "coffee", category: "food",
@@ -30,7 +30,7 @@ export const NEARBY_KINDS: Kind[] = [
   { id: "print", category: "study", label: "printer", words: /\b(print|printers?|printing)\b/, kinds: ["Printers and Print Services", "Computer Labs"] },
   { id: "study", category: "study", label: "place to study", words: /\b(study|library|libraries|lounge|quiet)\b/, kinds: ["Libraries", "Lounges", "Computer Labs"] },
   { id: "computer", category: "study", label: "computer lab", words: /\b(computer labs?|computers?)\b/, kinds: ["Computer Labs"] },
-  { id: "charge", category: "study", label: "phone charging station", words: /\b(charge my phone|phone charg\w*|charging stations?)\b/, kinds: ["Charging Stations"] },
+  { id: "charge", category: "study", label: "phone charging station", words: /\b(charge my phone|phone charg\w*|charging stations?|phone(?: is|'s)? dead|dead phone|battery(?: is)? dead|where (?:do|can) i charge|need(?: a| to)? charg\w*)\b/, kinds: ["Charging Stations"] },
   { id: "ev", category: "parking", label: "EV charger", words: /\b(ev|electric car|car charg\w*|chargers?)\b/, kinds: ["Level 2 Chargers", "DC Fast Chargers"] },
   { id: "parking", category: "parking", label: "parking", words: /\b(park|parking|parking lot|parking structure)\b/, kinds: ["Parking Structures", "Parking Lots"] },
   { id: "bike", category: "bikes", label: "bike rack", words: /\b(bike racks?|bicycle racks?|lock my bike)\b/, kinds: ["Bicycle Racks", "Bicycle Enclosures"] },
