@@ -225,9 +225,9 @@ export function App() {
 
   /** Phones: the panel is a bottom sheet that can be pulled up. */
   const [sheetOpen, setSheetOpen] = useState(false);
-  // Campus or illustrated (anything saved from before those were the only two is campus).
-  const [baseMap, setBaseMap] = useState<BaseMap>(() => (storage.get<string>("campus-nav:base-map", "campus") === "illustrated" ? "illustrated" : "campus"));
-  useEffect(() => storage.set("campus-nav:base-map", baseMap), [baseMap]);
+  // Illustrated unless you picked campus. A new key: the old one saved "campus" for everyone who'd opened the app.
+  const [baseMap, setBaseMap] = useState<BaseMap>(() => (storage.get<string>("campus-nav:map-style", "illustrated") === "campus" ? "campus" : "illustrated"));
+  useEffect(() => storage.set("campus-nav:map-style", baseMap), [baseMap]);
   const [placeCategories, setPlaceCategories] = useState<string[]>(() => storage.get<string[]>("campus-nav:place-categories", ["food"]));
   useEffect(() => storage.set("campus-nav:place-categories", placeCategories), [placeCategories]);
   // UCSD's places (restrooms, food, water...), fetched when first shown.
