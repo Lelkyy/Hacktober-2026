@@ -155,6 +155,77 @@ export function explainStatus(text: string): string | undefined {
   return undefined;
 }
 
+export interface FoodHit {
+  name: string;
+  hall: string;
+  locId: string;
+  locDetId: string;
+  /** "Pines / Breeze" */
+  where: string;
+  /** "9:00 AM - 11:00 PM" or "Closed" */
+  hours: string;
+}
+
+/** Hits from HDH's public menu search (every hall, not a signed-in Triton2Go queue). */
+export function parseSearch(html: string): FoodHit[] {
+  const hits: FoodHit[] = [];
+  const row = /<h4>([^<]+)<\/h4>[\s\S]*?<a href="[^"]*Venue_V3\?locId=(\d+)&locDetID=(\d+)">([^<]+)<\/a>\s*<br\s*\/?>\s*([^<]*?)\s*<br\s*\/?>\s*Today,\s*([^<]+)/gi;
+  for (const match of html.matchAll(row)) {
+    const name = match[1].replace(/\s+/g, " ").trim();
+    if (!name || name.startsWith('"')) continue;
+    hits.push({
+      name,
+      locId: match[2],
+      locDetId: match[3],
+      hall: match[4].trim(),
+      where: match[5].replace(/\s*\/\s*$/, "").replace(/\s+/g, " ").trim(),
+      hours: match[6].replace(/\s+/g, " ").trim(),
+    });
+  }
+  return hits;
+}
+
+const searchCache = new Map<string, Promise<FoodHit[]>>();
+
+/** A hall from a search hit, using the known list when we have one. */
+export function hallFromHit(hit: FoodHit): DiningHall {
+  return hallNamed(hit.hall) ?? { name: hit.hall, place: hit.hall, locId: hit.locId, locDetId: hit.locDetId, aliases: [] };
+}
+
+/** Every hall currently listing this food, from HDH's menu search. */
+export function searchMenus(query: string): Promise<FoodHit[]> {
+  const q = stem(query).trim();
+  if (!q) return Promise.resolve([]);
+  const hit = searchCache.get(q);
+  if (hit) return hit;
+  const pending = fetch(`/hdh/dining/apps/diningservices/Restaurants/SearchResults?searchText=${encodeURIComponent(q)}`)
+    .then((res) => {
+      if (!res.ok) throw new Error(`HDH search HTTP ${res.status}`);
+      return res.text();
+    })
+    .then(parseSearch);
+  searchCache.set(q, pending);
+  pending.catch(() => searchCache.delete(q));
+  return pending;
+}
+
+/** "open until 11:00 PM" or "closed right now", from the hours HDH prints. */
+export function openStatus(hours: string, now = new Date()): string {
+  if (/closed/i.test(hours)) return `closed right now`;
+  const match = hours.match(/(\d{1,2}):(\d{2})\s*(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (!match) return hours;
+  const mins = (h: string, m: string, ap: string) => {
+    let hour = Number(h) % 12;
+    if (ap.toUpperCase() === "PM") hour += 12;
+    return hour * 60 + Number(m);
+  };
+  const start = mins(match[1], match[2], match[3]);
+  const end = mins(match[4], match[5], match[6]);
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const open = end < start ? cur >= start || cur < end : cur >= start && cur < end;
+  return open ? `open until ${match[4]}:${match[5]} ${match[6].toUpperCase()}` : `closed right now (hours ${hours})`;
+}
+
 export function quote(menu: Menu, item: MenuItem, quantity: number, now = new Date()): string {
   const qty = Math.max(1, Math.min(20, Math.round(quantity)));
   const boxes = boxesFor(item.name, qty);
@@ -177,7 +248,7 @@ export function quote(menu: Menu, item: MenuItem, quantity: number, now = new Da
   }
   if (total !== undefined) lines.push(`About ${money(total)} at checkout${deposit ? `, including the deposit` : ""}.`);
   lines.push(
-    `${menu.hall.name} is listed as ${menu.hours}. A rough pickup is about ${prep} min once the kitchen has the ticket${MADE_TO_ORDER.test(item.name) || MADE_TO_ORDER.test(menu.hall.name) ? " (it's made to order)" : ""}. Off-peak, HDH says 7–9am and 2–5pm are faster.`,
+    `${menu.hall.name} is ${openStatus(menu.hours, now)}. A rough pickup is about ${prep} min once the kitchen has the ticket${MADE_TO_ORDER.test(item.name) || MADE_TO_ORDER.test(menu.hall.name) ? " (it's made to order)" : ""}. HDH does not publish the live Triton2Go queue without a login; off-peak (7–9am and 2–5pm) is when they say the line is shorter.`,
   );
   lines.push(`On the Triton2Go app, only "Pick up" or "Ready now" means it's actually ready.`);
   return lines.join(" ");
