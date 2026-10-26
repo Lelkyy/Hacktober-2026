@@ -1,5 +1,6 @@
 import type { ModeId } from "@campus/core";
 import { hallNamed } from "./dining.ts";
+import { whereTo } from "./agent.ts";
 import { budgetOf, dishOf, resolveHall } from "./menus.ts";
 import { PAYMENT_GUIDE, type Tender } from "./payment.ts";
 import { nearbyKind } from "./nearby.ts";
@@ -104,7 +105,8 @@ export function systemPrompt(now: Date, facts: string[] = []): string {
     ? `\nFacts already remembered. Use them when this message doesn't say otherwise: if a fact says how they travel, set mode; if it says where they usually start, set from. Don't put those facts in remember again.\n${facts.map((f) => `- ${f}`).join("\n")}\n`
     : "";
   return `You turn a UC San Diego student's chat message into JSON for a campus navigation app. It is ${today}, ${time}.
-Only copy what the message says; never invent rooms, buildings or times. Leave out fields the message doesn't mention.${known}
+Only copy what the message says; never invent rooms, buildings or times. Leave out fields the message doesn't mention.
+When the message starts with "Fill this JSON in", copy those fields and write reply from the Menu lines only. The student's sentence is not a dish. Never set maxPrice to 0. Never put the sentence in item.${known}
 ${PAYMENT_GUIDE}
 - action "class": they're going to a class. course = the course code as written ("math 20c" -> "MATH 20C"). meeting = lecture/discussion/lab/midterm/final if said.
 - action "route": they want to go somewhere that isn't a class. place = where.
@@ -142,7 +144,17 @@ Examples:
 "I usually bike and I live at Sixth College" -> {"action":"other","mode":"bike","from":"Sixth College","remember":["Usually bikes","Usually starts at Sixth College"],"reply":"I'll bike from Sixth College unless you say otherwise."}
 "I use a wheelchair" -> {"action":"other","mode":"accessible","remember":["Needs a step-free route"],"reply":"I'll keep your routes step-free."}
 "two matcha boba at Pines, how much and how long" -> {"action":"order","place":"Pines","item":"matcha boba","quantity":2}
-"what's good under $10" -> {"action":"order","maxPrice":10}
+"Fill this JSON in. Copy the fields. Do not guess a dish or a price.
+action: order
+item: omit
+place: omit
+maxPrice: 10 (under this, so this price itself is too much)
+reply: two sentences. Name dishes and prices copied from Menu. Say you will take them to the nearest hall.
+
+Menu:
+- Beans and Cheese Burrito | 64 Degrees | $7.50 | open
+
+Student asked for food under $10. They did not name a dish." -> {"action":"order","maxPrice":10,"reply":"Beans and Cheese Burrito at 64 Degrees is $7.50 and open. I'll take you to the nearest hall."}
 "burrito at 64 degrees under 12, from Price Center" -> {"action":"order","place":"64 Degrees","item":"burrito","maxPrice":12,"from":"Price Center"}
 "what accepts dining dollars" -> {"action":"order","tender":"dollars"}
 "what accepts triton cash" -> {"action":"order","tender":"cash"}
@@ -160,7 +172,7 @@ export function cleanIntent(raw: unknown): Intent | null {
   intent.course = text(r.course);
   intent.item = text(r.item);
   if (typeof r.quantity === "number" && r.quantity >= 1 && r.quantity <= 20) intent.quantity = Math.round(r.quantity);
-  const dollars = (v: unknown) => (typeof v === "number" && v >= 0 && v <= 80 ? Math.round(v * 100) / 100 : undefined);
+  const dollars = (v: unknown) => (typeof v === "number" && v > 0 && v <= 80 ? Math.round(v * 100) / 100 : undefined);
   intent.minPrice = dollars(r.minPrice);
   intent.maxPrice = dollars(r.maxPrice);
   if (r.tender === "dollars" || r.tender === "cash" || r.tender === "ebt") intent.tender = r.tender;
@@ -268,7 +280,7 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
   const wantsFood =
     budget.min != null ||
     budget.max != null ||
-    /\b(best|recommend|suggestion|what should i (?:eat|get|order)|what(?:'s| is) good|something to eat|cheap food|hungry)\b/.test(text);
+    /\b(best|recommend|suggestion|what should i (?:eat|get|order)|what(?:'s| is) good|something to eat|cheap(?:est|er)?|lowest(?:\s+price)?|least expensive|hungry|foods?|meals?|dishes?)\b/.test(text);
   const dollars = /\b(dining dollars?|triton dollars?)\b/.test(text);
   const cash = /\btriton cash\b/.test(text);
   const ebt = /\b(ebt|calfresh)\b/.test(text);
@@ -282,19 +294,23 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
     /\b(how much|price|cost|costs|order|menu|triton2\s?go|waiting for release|ready now|working on it)\b/.test(text) ||
     (!!hallNamed(text) && /\b(how long|wait)\b/.test(text)) ||
     wantsFood;
+  const going = whereTo(text);
   const myDay = /\b(what do i have|what'?s on|my day|my classes (today|tomorrow|on)|(classes|schedule) (today|tomorrow|on \w+))\b/.test(text);
   if (intent.course && /\b(add|taking|i take|enroll(ed)?( in)?|register(ed)?( for)?|sign me up)\b/.test(text)) intent.action = "add";
   else if (intent.course && /\b(drop|dropped|remove|delete|forget|not taking|no longer)\b/.test(text)) intent.action = "drop";
   else if (intent.course) intent.action = "class";
   else if (intent.tender) {
     // A payment question: the sentence is not a dish.
+  } else if (going) {
+    intent.action = "route";
+    intent.place = going.place;
   } else if (ordering) {
     intent.action = "order";
     const hall = resolveHall(text) ?? hallNamed(text)?.name;
     if (hall) intent.place = hall;
-    if (budget.min != null) intent.minPrice = budget.min;
-    if (budget.max != null) intent.maxPrice = budget.max;
-    if (budget.max != null && /\b(?:under|below|less than|cheaper than)\b/.test(text)) intent.maxInclusive = false;
+    if (budget.min != null && budget.min > 0) intent.minPrice = budget.min;
+    if (budget.max != null && budget.max > 0) intent.maxPrice = budget.max;
+    if (intent.maxPrice != null && /\b(?:under|below|less than|cheaper than)\b/.test(text)) intent.maxInclusive = false;
     const qty = text.match(/\b(\d{1,2}|two|three|four|five)\s+(?!am\b|pm\b|dollars?\b|bucks?\b)[a-z]/);
     const words: Record<string, number> = { two: 2, three: 3, four: 4, five: 5 };
     if (qty) {

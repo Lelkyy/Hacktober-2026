@@ -1,4 +1,5 @@
 import type { ChatSettings } from "./types.ts";
+import { foodSkill, turnSkill } from "./agent.ts";
 import { cleanIntent, INTENT_SCHEMA, parseLocally, systemPrompt, type Intent } from "./intent.ts";
 
 /** Chrome's built-in model (the Prompt API). Not in TypeScript's DOM types yet. */
@@ -113,12 +114,18 @@ export class ChatModel {
     return "patterns";
   }
 
-  /** `previous`: the request being changed, so "by bike instead" makes sense. `facts`: details already remembered. */
-  async read(message: string, previous: Intent | null, facts: string[] = []): Promise<Intent> {
+  /**
+   * `previous`: the request being changed, so "by bike instead" makes sense.
+   * `facts`: details already remembered.
+   * `modelInput`: the question the model sees, when the raw sentence has been rewritten with the facts it needs.
+   */
+  async read(message: string, previous: Intent | null, facts: string[] = [], modelInput?: string): Promise<Intent> {
     const fallback = parseLocally(message, this.isCourse);
-    const input = previous ? `Previous request: ${JSON.stringify(previous)}\nNew message: ${message}` : message;
+    const body = modelInput ?? message;
+    const input = modelInput ? modelInput : previous ? `Previous request: ${JSON.stringify(previous)}\n${body}` : body;
     try {
-      const answer = await this.ask(input, facts);
+      const skill = !modelInput ? undefined : modelInput.startsWith("Fill this JSON") ? foodSkill() : turnSkill();
+      const answer = await this.ask(input, facts, skill);
       const intent = answer === null ? null : cleanIntent(JSON.parse(jsonObject(answer)));
       if (!intent) return fallback;
       // A lasting detail the patterns caught ("I usually bike") even if the model left remember empty.
@@ -135,8 +142,13 @@ export class ChatModel {
       if (fallback.action === "order") {
         intent.action = "order";
         intent.place = fallback.place ?? intent.place;
-        intent.item = fallback.item ?? intent.item;
+        // A dish is only what the words name. The model's paraphrase of the question is not one.
+        intent.item = fallback.item;
         intent.quantity = fallback.quantity ?? intent.quantity;
+        // A price is only real when the student's words named it. The model invents caps like $0.75.
+        intent.minPrice = fallback.minPrice;
+        intent.maxPrice = fallback.maxPrice;
+        intent.maxInclusive = fallback.maxInclusive;
         if (fallback.tender) {
           intent.tender = fallback.tender;
           intent.nearest = fallback.nearest || intent.nearest;
@@ -158,15 +170,16 @@ export class ChatModel {
   }
 
   /** The model's raw JSON answer, or null when there's no model to ask. */
-  private async ask(input: string, facts: string[]): Promise<string | null> {
+  private async ask(input: string, facts: string[], skill?: string): Promise<string | null> {
     const now = new Date();
+    const system = skill ?? systemPrompt(now, facts);
     if (this.brain.kind === "chrome") {
       if (!this.brain.ready) {
         this.download(this.brain);
         return null;
       }
       // A fresh session each time: the date and time in the instructions stay current.
-      const session = await this.brain.model.create({ ...LANGUAGES, initialPrompts: [{ role: "system", content: systemPrompt(now, facts) }] });
+      const session = await this.brain.model.create({ ...LANGUAGES, initialPrompts: [{ role: "system", content: system }] });
       try {
         return await session.prompt(input, { responseConstraint: INTENT_SCHEMA });
       } finally {
@@ -181,7 +194,7 @@ export class ChatModel {
           model: this.brain.model,
           temperature: 0,
           messages: [
-            { role: "system", content: systemPrompt(now, facts) },
+            { role: "system", content: system },
             { role: "user", content: input },
           ],
           response_format: {
@@ -204,7 +217,7 @@ export class ChatModel {
           format: INTENT_SCHEMA,
           options: { temperature: 0 },
           messages: [
-            { role: "system", content: systemPrompt(now, facts) },
+            { role: "system", content: system },
             { role: "user", content: input },
           ],
         }),
