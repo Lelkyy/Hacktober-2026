@@ -4,6 +4,7 @@
  */
 
 import { money } from "./dining.ts";
+import { skillPrompt } from "./skill.ts";
 import { budgetOf, dishOf, pricePhrase, recommend, resolveHall, type FoodAsk, type FoodPick, type ScrapedMenus } from "./menus.ts";
 
 export interface FoodAnswer {
@@ -102,23 +103,25 @@ export function factCard(menus: ScrapedMenus | null | undefined, now = new Date(
 }
 
 /**
- * Instructions for every message. One skill, not a different rule per sentence.
- * Cursor skills are not loaded into Gemma.
+ * Instructions for every message. One skill, not a different rule per sentence:
+ * the shortest-route skill from .cursor/skills is part of it.
  */
 export function turnSkill(): string {
   return [
     "You help a UCSD student. The sentence may be casual, incomplete, or misspelled.",
-    "Use only the Facts. Do not copy the student's sentence into item or place.",
-    "action route: they want to go somewhere. place is a name copied from Places. If they did not name one, copy one place that fits.",
-    "action order: they want what to eat or a price. item is a Menu dish only when they named that dish. Otherwise omit item.",
+    "Use only the Facts for food and prices. Do not copy the student's sentence into item or place.",
+    "action route: they want to go somewhere. place is the building or place they named (Geisel, Price Center, WLH 2001), as written. Only if they asked for food without naming a place, copy one from Places.",
+    "from: where they start, if they said it.",
+    "action order: they want what to eat or a price. item is a Menu dish only when they named that dish. Otherwise omit item. Price Center is a place, not a price.",
     "action nearby: they want the closest restroom, water, coffee, or food.",
     "reply is two sentences using the Facts.",
+    skillPrompt(),
   ].join("\n");
 }
 
 /**
- * The only instructions Gemma gets on a food turn.
- * Cursor skills are never loaded into this model, and the long navigation prompt does not fit it.
+ * The only instructions Gemma gets on a food turn. Routes go through turnSkill, which carries
+ * the shortest-route skill; the long navigation prompt is too much for a menu question.
  */
 export function foodSkill(): string {
   return [

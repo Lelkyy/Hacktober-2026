@@ -735,6 +735,12 @@ export class Assistant {
     if (!trip) return { text: "Where do you want to go?" };
     const from = await this.start();
     if (!from) return this.askWhere(`${trip.title}. Where are you starting from?`, () => this.go());
+    // The start kept from an earlier message is where they're going now: ask instead of routing nowhere.
+    if (from.label === trip.to.label) {
+      this.from = null;
+      this.lastStart = null;
+      return this.askWhere(`${trip.title}. Where are you starting from?`, () => this.go());
+    }
     const options = this.planner.compare(from.endpoint, trip.to.endpoint, trip.arriveBy ?? undefined);
     const wanted = this.explicit ? options.find((o) => o.mode === this.explicit) : undefined;
     const picked = wanted ?? options[0];

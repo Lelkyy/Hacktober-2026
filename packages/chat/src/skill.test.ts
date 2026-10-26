@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { systemPrompt } from "./intent.ts";
+import { turnSkill } from "./agent.ts";
+import { parseLocally, systemPrompt } from "./intent.ts";
 import { parseSkill, SHORTEST_ROUTE } from "./skill.ts";
 
 describe("shortest-route skill", () => {
@@ -15,6 +16,16 @@ describe("shortest-route skill", () => {
     const prompt = systemPrompt(new Date(2026, 9, 25, 14, 0));
     expect(prompt).toContain('Skill "shortest-route"');
     expect(prompt).toContain(SHORTEST_ROUTE.instructions);
+  });
+
+  it("is in the instructions Gemma gets on every turn", () => {
+    expect(turnSkill()).toContain(SHORTEST_ROUTE.instructions);
+  });
+
+  it("reads Price Center as a place, not a price question", () => {
+    expect(parseLocally("fastest way from Price Center to Geisel", () => false)).toMatchObject({ action: "route", place: "geisel", from: "price center" });
+    expect(parseLocally("how do I get to price center", () => false)).toMatchObject({ action: "route", place: "price center" });
+    expect(parseLocally("how much is a burrito at price center", () => false).action).toBe("order");
   });
 
   it("refuses a file without frontmatter", () => {

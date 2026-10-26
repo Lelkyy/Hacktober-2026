@@ -292,8 +292,9 @@ export function parseLocally(message: string, isCourse: (code: string) => boolea
     intent.tender = dollars ? "dollars" : cash ? "cash" : "ebt";
     if (/\b(nearest|closest|near me|around me)\b/.test(text) || (/\bfind\b/.test(text) && /\b(places?|spots?)\b/.test(text))) intent.nearest = true;
   }
+  // "Price Center" is a place, not a price question.
   const ordering =
-    /\b(how much|price|cost|costs|order|menu|triton2\s?go|waiting for release|ready now|working on it)\b/.test(text) ||
+    /\b(how much|price|cost|costs|order|menu|triton2\s?go|waiting for release|ready now|working on it)\b/.test(text.replace(/\bprice cent(?:er|re)\b/g, " ")) ||
     (!!hallNamed(text) && /\b(how long|wait)\b/.test(text)) ||
     wantsFood;
   const going = whereTo(text);

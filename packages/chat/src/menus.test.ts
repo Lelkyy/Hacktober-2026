@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { answerFood, factCard, foodSkill, formatQuestion, pickHall, turnSkill, usableReply, whereTo } from "./agent.ts";
 import { parseLocally } from "./intent.ts";
 import { budgetOf, dishOf, recommend, resolveHall, type ScrapedMenus } from "./menus.ts";
+import { skillPrompt } from "./skill.ts";
 
 const menus: ScrapedMenus = {
   days: [{ date: "2026-10-25" }],
@@ -96,7 +97,8 @@ describe("recommend", () => {
     const skill = turnSkill();
     expect(card).toContain("Places:");
     expect(card).toContain("Beans and Cheese Burrito");
-    expect(skill.length).toBeLessThan(800);
+    // Short, apart from the shortest-route skill it carries.
+    expect(skill.replace(skillPrompt(), "").length).toBeLessThan(800);
     expect(skill).toContain("misspelled");
     expect(skill).not.toMatch(/MATH 20C/);
   });
