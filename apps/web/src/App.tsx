@@ -231,8 +231,9 @@ export function App() {
   // Illustrated unless you picked campus. A new key: the old one saved "campus" for everyone who'd opened the app.
   const [baseMap, setBaseMap] = useState<BaseMap>(() => (storage.get<string>("campus-nav:map-style", "illustrated") === "campus" ? "campus" : "illustrated"));
   useEffect(() => storage.set("campus-nav:map-style", baseMap), [baseMap]);
-  const [placeCategories, setPlaceCategories] = useState<string[]>(() => storage.get<string[]>("campus-nav:place-categories", ["food"]));
-  useEffect(() => storage.set("campus-nav:place-categories", placeCategories), [placeCategories]);
+  // No places on the map until you pick some. A new key: the old one saved "food" for everyone who'd opened the app.
+  const [placeCategories, setPlaceCategories] = useState<string[]>(() => storage.get<string[]>("campus-nav:map-places", []));
+  useEffect(() => storage.set("campus-nav:map-places", placeCategories), [placeCategories]);
   // UCSD's places (restrooms, food, water...), fetched when first shown.
   const [campusPlaces, setCampusPlaces] = useState<CampusPlaces | null>(null);
   useEffect(() => {
